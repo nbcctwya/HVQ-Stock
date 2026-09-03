@@ -9,3 +9,7 @@ mlruns/
 outputs/
 wandb/
 logs/
+
+# 实验调度系统运行时状态（本地，不入库）
+runner/state.json
+runner/worktrees/
