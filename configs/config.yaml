@@ -50,7 +50,7 @@ stage2_presets:
   csi300:
     predictor:
       # Stage 1 训练完成后在此填写生成的 checkpoint 文件名（checkpoints/ 目录下）
-      saved_model: ""
+      saved_model: "hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt"
       aux_weight: 0.01
       n_expert: 2
       transformer:
