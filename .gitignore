@@ -1,0 +1,10 @@
+checkpoints/
+res/
+results/
+dataset/data/
+__pycache__/
+*.pyc
+lightning_logs/
+mlruns/
+outputs/
+wandb/
