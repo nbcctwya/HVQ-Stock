@@ -15,13 +15,15 @@
 ## 关键配置
 
 - quantizer：hvq，num_levels=2，level_num_embed=[256, 256]，embed_dim=128，distance=l2，commit_weight=0.25，contras_loss=True
-- Stage 1：max 70 epoch，early stop patience 15；early stop 于 epoch 20，最佳 val_loss=0.4592（epoch 5）
-- Stage 2：max 70 epoch，early stop patience 15；early stop 于 epoch 9 后，最佳 val_loss=1.012；MoE n_expert=2（k=1），use_prior=True，target_day=5
+- Stage 1：max 70 epoch，early stop patience 15；训练至 epoch 20 触发 early stop，最佳 checkpoint 在 epoch 5（val_loss=0.4592）
+- Stage 2：max 70 epoch，early stop patience 15；训练至 epoch 20 触发 early stop，最佳 checkpoint 在 epoch 5（val_loss=1.0125）；MoE n_expert=2（k=1），use_prior=True，target_day=5
+
+注：两个 stage 日志中的 `val_loss` 均为 **total validation loss**（`recon_loss + vq_loss + pred_weight * pred_loss`，见 `trainer/train_vqvae.py:70`），不是单独的 reconstruction loss；分项 val_recon_loss / val_vq_loss / val_pred_loss 只进 logger，未落控制台日志。
 
 ## 训练耗时（单 seed）
 
 - Stage 1：约 55 分钟（21 个 epoch × 约 2.4 分钟，含数据加载）
-- Stage 2：约 34 分钟（10 个 epoch × 约 1.7 分钟 + 数据加载 + valid/test 推理）
+- Stage 2：约 36 分钟（21 个 epoch × 约 1.7 分钟 + 数据加载 + valid/test 推理）
 - 回测：约 1 分钟
 
 ## 预测指标（test，2023-01-03 – 2025-12-31，727 个交易日）
@@ -55,6 +57,6 @@
 
 ## 备注
 
-- Stage 1 重构 val_loss 明显优于单层基线（0.459 vs 0.568），表示容量提升未转化为 RankIC 增益，残差容量可能花在重构细节上而非排序信息上
+- Stage 1 最佳 val_loss（total）明显低于单层基线（0.459 vs 0.568），总损失改善未转化为 RankIC 增益；由于 total_loss 中 vq_loss 占比可观、两个量化器的 vq 项规模不同，该对比只能作为参考，不能解读为重构质量提升
 - 回测口径为 PRISM 原生（CN 不限涨跌停），与 fusion_analysis 统一协议（limit=0.095）不直接可比
 - 下一步：补跑 seed 1–4；跑 `type: single` 同仓库对照组；观察 per-level perplexity 判断各级 codebook 利用率
