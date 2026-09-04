@@ -81,20 +81,12 @@ artifact_root 的上一轮 smoke 完全一致，仅供流程验证）；全部�
 
 ## Result
 
-Status: PENDING
+Status: FAILED
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
-
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/002/run/stage2.log
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/002/run/stage2.log
+
+全部 artifact 与日志保留在 `artifacts/002/run/`。
