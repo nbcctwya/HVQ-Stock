@@ -7,9 +7,16 @@
 
 - `main` 只负责保存 `experiments/queue.yaml` 和 `experiments/records/`
   （以及本框架自身的模板文件）。`main` 上不出现任何实验性代码改动。
+- `main` 根目录的 `README.md` 永远保留原始 PRISM-VQ 的项目说明，
+  不得在 `main` 上修改。
 - `exp/<ID>-<name>` 实验分支只保存该实验的代码改动，
   不在实验分支上创建 record 或修改 queue。
-- 因此实验代码与实验元数据严格分离：代码在 exp 分支，
+- 每个 `exp/<ID>-<name>` 实验分支都必须将根目录 `README.md` 改写为
+  该实验自己的说明，内容至少包括：Base、Idea / Motivation、核心修改、
+  与 base 的区别、smoke 状态。分支 README 属于实验分支自身，
+  随实验代码一起提交到 exp 分支；但 `queue.yaml` 和 `records/`
+  仍然只允许在 `main` 上修改。
+- 因此实验代码与实验元数据严格分离：代码（含分支 README）在 exp 分支，
   队列与记录永远只在 `main`。
 
 ## 创建一个新实验的流程
@@ -41,6 +48,10 @@
   `base: exp/001-hvq-residual-2level`）。
 - 不要自动推断继承关系；用户未明确指定时，始终使用 `main`。
 - 创建分支前必须先确认 `base` 分支真实存在（`git rev-parse --verify`）。
+- 创建新实验分支后，必须确认 `configs/config.yaml` 中默认
+  `train.seed` 为 0；当前筛选阶段所有实验统一使用 `train.seed: 0`
+  （只指 Stage 2 使用的 `train.seed`；Stage 1 固定的 seed 42 逻辑
+  不得改动）。
 - queue 条目和 record（`## Git` 的 `Base:`）中的 `base` 必须一致。
 - 一个实验只修改该 Idea 必需的内容，不顺手重构无关代码。
 - 默认保持数据划分、seed、训练协议、回测协议和其他 baseline

@@ -85,7 +85,7 @@ predictor:
   aux_imp: 3
   
 train:
-  seed: 1 # 
+  seed: 0 # 
   device: "cuda"
   batch_size: 300 
   learning_rate: 0.0001 
