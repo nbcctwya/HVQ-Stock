@@ -73,6 +73,17 @@ class ResidualVectorQuantiser(nn.Module):
 
         return z_q_output, total_loss, (perplexities, min_encodings_list, indices_list)
 
+    def forward_level0(self, h_batch):
+        """只运行第 0 级量化，返回 (z_q0, loss_0, ([ppl_0], [min_enc_0], [idx_0]))。
+
+        z_q0 数值上等于第 0 级 codebook 向量（该级 VectorQuantiser 内部 STE 保证
+        梯度可回传到 h_batch），返回结构与 forward 同构，只是各级统计量为
+        长度 1 的 list。用于 z0-only 消融：Stage 2 只使用第一级量化表示。
+        不改变 forward 的默认 z0 + z1 行为。
+        """
+        z_q0, loss_0, (perplexity_0, min_encodings_0, indices_0) = self.levels[0](h_batch)
+        return z_q0, loss_0, ([perplexity_0], [min_encodings_0], [indices_0])
+
 
 def create_quantizer(vqvae_cfg):
     """

@@ -21,7 +21,7 @@ vqvae:
 
   quantizer:
     # type: 'single' 保持 PRISM-VQ 原行为；'hvq' 启用残差式层次化量化（ResidualVectorQuantiser）
-    # 本实验（001）默认即为 'hvq'，直接运行默认配置就是该实验本身。
+    # 本实验（003，基于 001）Stage 1 保持与 001 相同的两级 'hvq' 训练方式。
     type: 'hvq'
     num_levels: 2
     level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
@@ -102,6 +102,9 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  # 003 实验核心开关：Stage 2 只使用 Residual HVQ 第一级量化输出 z0（而非 z0+z1）。
+  # 默认 True 即本实验本身；设为 False 回退到 001 的 z0+z1 行为。
+  z0_only: true
   
 train:
   seed: 0 # 

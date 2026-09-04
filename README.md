@@ -1,138 +1,97 @@
-# exp/001 — hvq-residual-2level
+# exp/003 — hvq-z0-only
 
-- Base: `main`（原始 PRISM-VQ）
-- Branch: `exp/001-hvq-residual-2level`
+- Base: `exp/001-hvq-residual-2level`
+- Branch: `exp/003-hvq-z0-only`
 
 ## Idea / Motivation
 
-在 PRISM-VQ 基础上引入残差式层次化向量量化（Residual HVQ），用 2 级
-codebook（256 + 256）替代单层 512 codebook，验证残差式 2 级 VQ 能否在
-保持 IC 的同时改善码本利用与训练稳定性。
+001 使用两级 Residual HVQ：最终量化表示为 `z = z0 + z1`，其中 `z0` 是第 0 级
+VQ 输出，`z1` 是对残差 `h - z0` 进行第 1 级 VQ 得到的输出。
 
-# HVQ-Stock
+003 是一个消融实验：**Stage 1 保持与 001 完全相同的两级 Residual HVQ 训练方式，
+但 Stage 2 收益预测阶段只使用第一级量化表示 `z0`，而不是 `z0 + z1`**。
 
-层次化向量量化（Hierarchical VQ / Residual VQ）股票预测实验仓库。代码以
-[PRISM-VQ](../PRISM-VQ)（IJCAI-ECAI 2026）为底，在其两阶段框架上将 Stage 1 的
-单层 `VectorQuantiser` 扩展为**残差式多级量化器 `ResidualVectorQuantiser`**，
-用于对比离散表示容量对收益预测的影响。实验市场：CSI300。
+目的：验证 Residual HVQ 的第二级残差量化 `z1` 是否真的为最终股票收益预测
+提供了有效信息。对比：
 
-## 与上游 PRISM-VQ 的关系
+- 001：Stage 2 input = `z0 + z1`
+- 003：Stage 2 input = `z0`
 
-- 全部训练/评估代码拷贝自 `../PRISM-VQ`，仅做最小改动（见下文"改动点"）。
-- 量化器接口保持兼容：`forward(h_batch)` 输入 `(N_t, 128)`，返回
-  `(z_q, vq_loss, (perplexity, min_encodings, encoding_indices))`，z_q 走 STE。
-- 本实验分支的默认配置即为 `vqvae.quantizer.type: 'hvq'`（实验本身，
-  直接运行默认配置即可）；手动改为 `'single'` 可回退到与上游完全一致的行为。
-- 不复制上游的大制品：数据集（`dataset/data/`，9GB）、checkpoints、结果文件。
-  预处理 pickle 默认直接读取 `../PRISM-VQ/dataset/data`（见"数据路径配置"）。
+若 003 与 001 的预测/回测表现持平，说明第二级残差量化对下游预测没有实质
+贡献；若 003 显著变差，则说明 `z1` 携带了有效信息。
 
-## 目录结构
+## 核心修改（相对 base 001）
 
-```text
-stage1.py               Stage 1：训练 VQ-VAE 表征模型（固定 seed 42）
-stage2.py               Stage 2：加载 Stage 1 checkpoint，训练收益预测模型
-module/
-  quantise.py           上游单层 VectorQuantiser（未改动）
-  quantise_hvq.py       新增：ResidualVectorQuantiser + create_quantizer 工厂
-  autoencoder.py        VQVAE（量化器实例化改为走 create_quantizer）
-trainer/
-  train_vqvae.py        Stage 1 Lightning 模块
-  train_ypred.py        Stage 2 Lightning 模块（工厂分支 + codebook 冻结修复）
-  train_ypred_*.py      上游消融变体（未改动，不支持 hvq 开关）
-configs/config.yaml     全部实验配置
-dataset/                数据预处理脚本与 universe 配置（不含 data/）
-tests/                  单元测试
-scripts/ utils/         上游工具脚本
-```
+- `module/quantise_hvq.py::ResidualVectorQuantiser` 新增 `forward_level0(h_batch)`
+  方法：只运行第 0 级量化，返回 `(z_q0, loss_0, ([ppl_0], [min_enc_0], [idx_0]))`，
+  返回结构与 `forward` 同构。默认 `forward` 的 `z0 + z1` 行为完全不变，
+  Stage 1 训练不受影响。
+- `trainer/train_ypred.py::GenerateReturn`：
+  - `__init__` 读取 `config['predictor'].get('z0_only', False)`；`z0_only=True`
+    时要求量化器为 `ResidualVectorQuantiser`，否则报错。
+  - `forward` 中 `z0_only=True` 时调用 `self.quantizer.forward_level0(h_batch)`
+    取 `z0`（随后照常 `.detach()`，送入 loading generator / latent value head /
+    return predictor）；否则走原 `self.quantizer(h_batch)` 路径（`z0 + z1`）。
+- `configs/config.yaml`：`predictor.z0_only: true`——默认配置即为 003 实验本身，
+  不需要任何实验特有 CLI override；`train.seed: 0`（Stage 2）保持不变。
+- 新增 `tests/test_z0_only.py`（6 个用例：z0 数值等于第 0 级 codebook 查表、
+  z0 排除第二级、返回接口与 forward 同构、STE 梯度回传、默认 forward 行为不变、
+  默认 config 已启用 z0_only）。
 
-## 残差式层次化量化器（HVQ）
+## 与 base（001）的区别
 
-`module/quantise_hvq.py::ResidualVectorQuantiser` 用 `nn.ModuleList` 堆叠
-`num_levels` 个上游 `VectorQuantiser`：
+唯一核心实验变量：Stage 2 的量化表示输入由 `z0 + z1` 改为 `z0`。
 
-- 第 0 级量化编码器输出 `h`；第 l 级量化前级残差 `r = h - sum(z_q_j)`。
-- 最终 `z_q = sum(z_q_l)`，整体 STE：`z_q_output = h + (z_q - h).detach()`。
-- 总 vq_loss 为各级 loss 之和（各级内部已含 beta commitment + codebook loss；
-  `contras_loss` 逐层按各自残差计算）。
-- 每一级有独立的 codebook 与 FeaturePool，dead-code 重初始化逻辑（training mode
-  下自动生效）逐层独立保留。
-- 返回签名与单层一致，但 perplexity / encodings / indices 为长度为
-  `num_levels` 的按级 list（Stage 2 forward 只用 z_q，不受影响；Stage 1 的
-  codebook 利用率统计取第 0 级）。
+保持不变：
 
-## 配置开关
-
-`configs/config.yaml`：
-
-```yaml
-vqvae:
-  quantizer:
-    type: 'hvq'               # 本实验默认即为 'hvq'；'single' 为上游原行为
-    num_levels: 2             # hvq 量化级数
-    level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
-```
-
-Stage 1 与 Stage 2 通过同一个 `create_quantizer` 工厂实例化量化器，两阶段共用
-一份 config 即可保证 checkpoint 参数命名（`quantizer.` / `quantizer.levels.*`）
-严格匹配。
-
-## 数据路径配置
-
-预处理 pickle 目录优先读 `data.pickle_dir`（默认 `../PRISM-VQ/dataset/data`，
-即复用 PRISM-VQ 已生成的数据），缺省回退 `data.data_path`；文件名拼接逻辑不变
-（`<universe>_<window>_h<pred_len>_dl2_{train,valid,test}.pkl`，位于
-`<pickle_dir>/<region>/` 下）。如需自行生成数据，用 `dataset/get_dataset.py`
-生成后修改 `data.pickle_dir` 指向即可。
+- Stage 1 两级 HVQ 结构、训练目标（recon + vq + pred）与训练流程（固定
+  seed 42）与 001 完全一致——`forward` 默认行为未动，`stage1.py` 未改动。
+- 数据划分（train 2009–2020 / valid 2021–2022 / test 2023–2025，CSI300）、
+  训练协议（max 70 epoch、early stop patience 15）、回测协议
+  （Top30/Drop5，open 0.0005 / close 0.0015）、MoE/prior 等全部参数。
+- Stage 2 默认 `train.seed: 0`。
 
 ## 运行
 
-默认配置即为本实验（HVQ），无需额外 override 启用核心改动：
+默认配置即为本实验（z0-only），无需额外 override 启用核心改动：
 
 ```bash
-# Stage 1（HVQ）
+# Stage 1（两级 Residual HVQ，与 001 相同；固定 seed 42）
 conda run -n prism-vq python stage1.py data.universe=csi300
 
-# Stage 2：configs/config.yaml 的 stage2_presets.csi300.predictor.saved_model
-# 已填入本实验 Stage 1 checkpoint；直接运行：
+# Stage 2（z0-only；configs/config.yaml 的 stage2_presets.csi300.predictor.saved_model
+# 需填入 Stage 1 生成的 checkpoint 文件名）
 conda run -n prism-vq python stage2.py data.universe=csi300
 ```
 
 CLI override 仅用于统一执行层参数，例如：
 
 ```bash
-# 多 seed sweep
-python stage2.py -m data.universe=csi300 train.seed=0,1,2,3,4
-
-# artifact 隔离：checkpoints/res 落到 artifacts/001/run/ 下，
-# Stage 2 也会从该目录加载 Stage 1 checkpoint
-python stage2.py data.universe=csi300 artifact_root=artifacts/001/run
+# artifact 隔离：checkpoints/res/wandb 落到 artifacts/003/run/ 下，
+# Stage 2 也会从该目录的 checkpoints/ 加载 Stage 1 checkpoint
+python stage1.py data.universe=csi300 artifact_root=artifacts/003/run
+python stage2.py data.universe=csi300 artifact_root=artifacts/003/run \
+  predictor.saved_model="<stage1_ckpt_name>.ckpt"
 ```
 
 ## 单元测试
 
 ```bash
+conda run -n prism-vq python -m unittest tests.test_z0_only -v
+# 回归：001 的 HVQ 测试不受影响
 conda run -n prism-vq python -m unittest tests.test_hvq -v
 ```
 
-## 改动点（相对上游 PRISM-VQ）
-
-- 新增 `module/quantise_hvq.py`：`ResidualVectorQuantiser` 与 `create_quantizer`。
-- `module/autoencoder.py`、`trainer/train_ypred.py`：量化器实例化改为工厂分支。
-- `trainer/train_vqvae.py`：codebook 利用率统计兼容 hvq 的按级 indices list（取第 0 级）。
-- `trainer/train_ypred.py::GenerateReturn`：覆写 `train()`，强制 quantizer 保持 eval，
-  修复 Lightning 递归 `.train()` 导致已冻结 codebook 在 training mode 下被 `.data`
-  改写（dead-code 重初始化）的漏洞。
-- `stage1.py` / `stage2.py`：pickle 目录支持 `data.pickle_dir`。
-- `configs/config.yaml`：新增 quantizer `type` / `num_levels` / `level_num_embed`、
-  `data.pickle_dir`；`stage2_presets` 的 `saved_model` 置空待训练后填写。
-- 新增 `tests/test_hvq.py`。
-
 ## Smoke 状态
 
-PASS — Stage 1（HVQ，1 epoch smoke 及完整训练均跑通）与 Stage 2
-（seed 0）全流程验证通过；详见 `main` 分支
-`experiments/records/001-hvq-residual-2level.md`。
+PASS — 单元测试 6/6（z0-only）+ 14/14（001 HVQ 回归）通过；Stage 1 与
+Stage 2 各 1 epoch smoke 跑通（`artifact_root=artifacts/003/smoke`），Stage 2
+正确从 smoke artifact 目录加载两级 HVQ checkpoint 且实际使用 `z0`；全部产物
+落在 `artifacts/003/smoke/`，未写入公共 `checkpoints/` / `res/`。详见 `main`
+分支 `experiments/records/003-hvq-z0-only.md`。
 
 ---
 
-原始 PRISM-VQ 项目说明见 `main` 分支的 README。
+本仓库以 [PRISM-VQ](../PRISM-VQ)（IJCAI-ECAI 2026）为底；两级 Residual HVQ 的
+完整实现说明见 `exp/001-hvq-residual-2level` 分支 README。原始 PRISM-VQ 项目
+说明见 `main` 分支的 README。

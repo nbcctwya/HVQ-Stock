@@ -12,7 +12,7 @@ from module.bidirectional import LoadingGenerator
 from utils import get_root_dir, calc_ic
 from utils.rankloss import RankLoss
 from module.quantise import VectorQuantiser
-from module.quantise_hvq import create_quantizer
+from module.quantise_hvq import ResidualVectorQuantiser, create_quantizer
 from module.layers.encoder import SpatialEncoder
 from module.layers.decoder import ReconstructionDecoder
 from module.layers.src import RevIN
@@ -85,6 +85,15 @@ class GenerateReturn(pl.LightningModule):
 
         # 2. Vector Quantizer（按 quantizer.type 选择单层或残差式 HVQ）
         self.quantizer = create_quantizer(vqvae_cfg)
+
+        # 003 消融开关：Stage 2 只使用 Residual HVQ 第一级量化输出 z0（而非 z0+z1）。
+        # 默认 False 保持 001 的 z0+z1 行为。
+        self.z0_only = config['predictor'].get('z0_only', False)
+        if self.z0_only and not isinstance(self.quantizer, ResidualVectorQuantiser):
+            raise ValueError(
+                "predictor.z0_only=True 需要 hvq 量化器 (ResidualVectorQuantiser)，"
+                "当前 quantizer.type 不是 'hvq'"
+            )
         
         # 3. RevIN
         self.revin = RevIN(self.num_features)
@@ -170,7 +179,11 @@ class GenerateReturn(pl.LightningModule):
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
-        z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
+        if self.z0_only:
+            # z0-only 消融：只取 Residual HVQ 第一级量化输出 z0（而非 z0+z1）
+            z_q, _, (_, min_encodings, vq_idx) = self.quantizer.forward_level0(h_batch)
+        else:
+            z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
         z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
