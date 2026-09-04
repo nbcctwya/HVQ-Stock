@@ -336,8 +336,12 @@ class ReturnPredictor(nn.Module):
         self.fusion = fusion
         if self.fusion == 'gated':
             # Per-sample scalar gate deciding prior vs latent weight.
-            # Zero-init bias -> gate starts at 0.5 (equal weighting).
+            # Explicit zero init -> gate = 0.5 for every sample, and with the
+            # 2x scaling below the initial output is exactly the original
+            # fixed fusion: alpha + prior_term + latent_term.
             self.gate = nn.Linear(num_prior + num_latent, 1)
+            nn.init.zeros_(self.gate.weight)
+            nn.init.zeros_(self.gate.bias)
 
     def forward(self, alpha, beta_p, beta_l, f_prior, f_latent):
         prior_term = (beta_p * f_prior).sum(dim=1)
@@ -350,7 +354,7 @@ class ReturnPredictor(nn.Module):
             if self.fusion == 'gated':
                 gate_input = torch.cat([f_prior, f_latent], dim=1)  # (B, P+K)
                 gate = torch.sigmoid(self.gate(gate_input)).squeeze(-1)  # (B,)
-                output = alpha + gate * prior_term + (1.0 - gate) * latent_term
+                output = alpha + 2.0 * gate * prior_term + 2.0 * (1.0 - gate) * latent_term
             else:
                 output = alpha + prior_term + latent_term # + intercept_term
         else:

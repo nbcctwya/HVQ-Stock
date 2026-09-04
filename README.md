@@ -1,140 +1,58 @@
-# Vector-Quantized Discrete Latent Factors Meet Financial Priors: Dynamic Cross-Sectional Stock Ranking Prediction for Portfolio Construction
+# exp/002 — prior-gated-fusion
 
-<div align="center">
+实验分支：在 PRISM-VQ 的 Stage 2 中，将 prior factor 与 learned latent
+factor 的固定融合改为可学习的 gated fusion。
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status](https://img.shields.io/badge/Status-Accepted-brightgreen.svg)](https://github.com)
+- Base: `main`（原始 PRISM-VQ）
+- Branch: `exp/002-prior-gated-fusion`
 
-</div>
+## Idea / Motivation
 
-This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
+原始 PRISM-VQ 的 Stage 2 收益预测为固定相加：
 
-## Baseline Results Protocol v1.0
-
-The repository includes a non-invasive adapter that evaluates the existing
-CSI300 and S&P 500 seed predictions under a common Qlib protocol.  It does not
-replace training or the project's native backtest outputs.  Generate and
-validate the comparable artifacts with:
-
-```bash
-conda run -n prism-vq python generate_baseline_results.py --out results
-conda run -n prism-vq python inspect_eval_results.py --out results
-conda run -n prism-vq python -m unittest -v tests/test_protocol_metrics.py
+```
+y = alpha + prior_term + latent_term
 ```
 
-`results/metrics/` contains numeric seed, aggregate, and independently
-re-backtested ensemble metrics.  `results/tables/` contains four-decimal
-display tables only, `results/curves/ensemble/` contains daily gross return,
-cost, net return, benchmark return, and NAV series, and `results/metadata/`
-records the discovered data split and complete evaluation convention.
-`results/diagnostics/validation.json` is the machine-readable validation
-report.  No extra cache or artifact directory is written inside `results/`;
-the validator reconstructs the ensemble score from the seed predictions when
-needed.
+prior 信息与 latent 信息的相对贡献无法随样本调整。本实验引入一个
+可学习的 per-sample 标量门 `g`，让模型自适应决定当前样本中两类信息
+各占多少权重。
 
-Prediction metrics are daily cross-sectional Pearson IC and Spearman RankIC;
-their IR values use daily sample standard deviation (`ddof=1`) without annual
-scaling.  Portfolio metrics use `log1p(gross_return - cost)`, 252 trading days,
-sample standard deviation, zero risk-free rate, and zero daily MAR.  The
-protocol backtest uses Qlib `TopkDropoutStrategy` with TopK=30, DropN=5 and the
-full fixed configuration recorded in `results/metadata/eval_config.json`.
+## 核心修改
 
-📄 **Paper**: Accepted at IJCAI-ECAI 2026
+`trainer/train_ypred.py::ReturnPredictor` 新增 `fusion` 参数
+（`'fixed' | 'gated'`，默认 `'fixed'` 保持原行为）。`'gated'` 模式下：
+
+```
+g = sigmoid(Linear([f_prior, f_latent]))        # (B,)
+y = alpha + 2*g*prior_term + 2*(1-g)*latent_term
+```
+
+- gate 参数显式零初始化（`gate.weight = 0`，`gate.bias = 0`），
+  保证初始化时所有样本 `g = 0.5`；
+- 2 倍缩放使 `g = 0.5` 时严格等价于原始固定融合
+  `alpha + prior_term + latent_term`，即模型从"与 base 完全等价"的
+  起点开始学习如何偏离等权；
+- `configs/config.yaml` 设置 `predictor.fusion: 'gated'`，
+  默认 `train.seed: 0`；
+- `use_prior=False` 消融路径不受影响；
+- 新增 `tests/test_gated_fusion.py`（9 个单元测试）。
+
+## 与 base 的区别
+
+唯一实验变量是 Stage 2 `ReturnPredictor` 中 prior/latent 两项的融合
+方式：base 为固定相加，本分支为零初始化的可学习 gate 加权（初始与
+base 严格等价）。数据划分、训练协议（Stage 1 固定 seed 42，Stage 2
+seed 0，70 epoch / patience 15）、回测协议与模型其余部分均不变。
+
+## Smoke 状态
+
+PASS — 单元测试 9/9 通过；Stage 1 smoke（1 epoch，
+`gfuse_smoke-epoch=0-val_loss=0.9228.ckpt`）与 Stage 2 smoke
+（1 epoch，seed 0，gated fusion）全流程跑通，checkpoint 中确认
+`return_predictor.gate` 参数存在且参与训练。
+日志见 `logs/stage1_gfuse_smoke.log`、`logs/stage2_gfuse_smoke.log`。
 
 ---
 
-## 📋 Abstract
-
-Stock return prediction presents several unique challenges that motivate our architectural design. Financial time series exhibit extremely low signal-to-noise ratios, with predictable components often masked by market microstructure noise and idiosyncratic shocks. Additionally, stocks do not evolve independently—their returns exhibit complex cross-sectional dependencies driven by industry relationships, supply chain connections, and correlated investor behavior. Market regimes shift over time, requiring models to adapt factor loadings dynamically rather than assuming stationarity. Finally, practitioners require interpretable models that align with financial theory, as black-box predictions are difficult to validate and deploy in regulated environments.
-
-<div align="center">
-  <img src="images/detailed-prism.png" alt="PRISM-VQ Architecture" width="100%"/>
-  <p><em>Architecture of PRISM-VQ. The spatial learning stage (left) learns discrete stock representations via vector quantization over cross-sectional features. The temporal learning stage (right) uses these discrete codes to gate expert networks, generating dynamic factor loadings that fuse expert prior factors and learned latent factors for return prediction.</em></p>
-</div>
-
-## 🎯 Key Contributions
-
-- **Unified Framework**: We propose PRISM-VQ, a unified dynamic factor model that systematically integrates expert prior factors, data-driven discrete latent factors, and adaptive temporal modeling. To our knowledge, this is the first framework to combine these three components within a principled factor model structure.
-
-- **Vector Quantization**: We introduce vector quantization as an inductive bias for learning robust cross-sectional factors in financial markets. We demonstrate that discrete representations provide superior regularization compared to continuous alternatives in low signal-to-noise environments.
-
-## 🚀 Installation
-
-### 📦 Requirements
-
-```
-Python 3.11
-PyTorch 2.4.1
-Qlib 0.9.6.99
-Hydra & OmegaConf
-```
-
-### 🔧 Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/x7jeon8gi/PRISM-VQ.git
-cd PRISM-VQ
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## 📊 Data Preparation
-
-The model uses two data sources:
-
-1. **Qlib Data**: Stock market data from Qlib's data repository
-2. **JKP Global Factors**: Jensen, Kelly, and Pedersen (JKP) global factor data
-
-
-## 🏋️ Training
-
-The model training consists of two stages:
-
-### Stage 1: VQ-VAE Training
-```bash
-python stage1.py
-```
-
-### Stage 2: Predictive Model Training
-```bash
-python stage2.py
-```
-
-### ⚙️ Configuration
-
-All model configurations are managed through Hydra configuration files located in `configs/`. Key parameters include:
-
-- `data.universe`: Choose between 'sp500' or 'csi300'
-- `vqvae.num_embed`: Number of codebook entries
-- `predictor.n_expert`: Number of experts in MoE
-- `stage2_presets`: Market-specific Stage 2 defaults for checkpoint, auxiliary weight, MoE experts, and attention heads. `stage2.py` applies these automatically from `data.universe`.
-
-
-## 📁 Project Structure
-
-```
-PRISM-VQ/
-├── 📂 configs/           # Hydra configuration files
-├── 📂 dataset/           # Data loading and processing
-├── 📂 module/            # Model architecture components
-│   ├── 📄 autoencoder.py
-│   ├── 📄 quantise.py
-│   └── 📂 layers/
-├── 📂 trainer/           # Training scripts
-├── 📂 utils/             # Utility functions
-├── 🚀 stage1.py          # Stage 1 training entry point
-└── 🚀 stage2.py          # Stage 2 training entry point
-```
-
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-We thank the Qlib team for providing the financial data infrastructure and the authors of the JKP factors for making their data publicly available. We also acknowledge the [CVQ-VAE](https://github.com/lyndonzheng/CVQ-VAE) project for inspiration on vector quantization techniques.
+原始 PRISM-VQ 项目说明见 `main` 分支的 README。

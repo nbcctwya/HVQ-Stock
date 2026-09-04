@@ -39,32 +39,36 @@ class GatedFusionTests(unittest.TestCase):
         expected = self.alpha + self.latent_term
         self.assertTrue(torch.allclose(out, expected))
 
-    def test_gated_mode_defaults_to_equal_weighting(self):
+    def test_gated_mode_gate_is_zero_initialized(self):
         predictor = ReturnPredictor(self.P, self.K, use_prior=True, fusion='gated')
-        with torch.no_grad():
-            predictor.gate.weight.zero_()
-            predictor.gate.bias.zero_()
-        out = self._forward(predictor)
-        expected = self.alpha + 0.5 * self.prior_term + 0.5 * self.latent_term
-        self.assertEqual(out.shape, (self.B,))
-        self.assertTrue(torch.allclose(out, expected, atol=1e-6))
+        self.assertTrue(torch.all(predictor.gate.weight == 0))
+        self.assertTrue(torch.all(predictor.gate.bias == 0))
+
+    def test_gated_mode_initial_output_equals_fixed_fusion(self):
+        # No manual parameter reset: a freshly built gated predictor must
+        # reproduce the original PRISM-VQ fixed fusion exactly (g = 0.5).
+        gated = ReturnPredictor(self.P, self.K, use_prior=True, fusion='gated')
+        fixed = ReturnPredictor(self.P, self.K, use_prior=True, fusion='fixed')
+        out_gated = self._forward(gated)
+        out_fixed = self._forward(fixed)
+        self.assertEqual(out_gated.shape, (self.B,))
+        self.assertTrue(torch.equal(out_gated, out_fixed))
 
     def test_gated_mode_interpolates_between_prior_and_latent(self):
         predictor = ReturnPredictor(self.P, self.K, use_prior=True, fusion='gated')
         with torch.no_grad():
-            predictor.gate.weight.zero_()
             predictor.gate.bias.fill_(20.0)
         out = self._forward(predictor)
-        self.assertTrue(torch.allclose(out, self.alpha + self.prior_term, atol=1e-4))
+        self.assertTrue(torch.allclose(out, self.alpha + 2.0 * self.prior_term, atol=1e-4))
         with torch.no_grad():
             predictor.gate.bias.fill_(-20.0)
         out = self._forward(predictor)
-        self.assertTrue(torch.allclose(out, self.alpha + self.latent_term, atol=1e-4))
+        self.assertTrue(torch.allclose(out, self.alpha + 2.0 * self.latent_term, atol=1e-4))
 
     def test_gated_mode_gate_is_sample_adaptive(self):
         predictor = ReturnPredictor(self.P, self.K, use_prior=True, fusion='gated')
         with torch.no_grad():
-            predictor.gate.bias.zero_()
+            predictor.gate.weight.normal_(0.0, 0.1)
         out_a = predictor(self.alpha, self.beta_p, self.beta_l,
                           self.f_prior, self.f_latent)
         out_b = predictor(self.alpha, self.beta_p, self.beta_l,
@@ -76,6 +80,7 @@ class GatedFusionTests(unittest.TestCase):
         out = self._forward(predictor)
         out.sum().backward()
         self.assertIsNotNone(predictor.gate.weight.grad)
+        self.assertIsNotNone(predictor.gate.bias.grad)
         self.assertTrue(torch.isfinite(predictor.gate.weight.grad).all())
         self.assertGreater(predictor.gate.weight.grad.abs().sum().item(), 0.0)
 
