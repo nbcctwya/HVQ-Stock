@@ -25,6 +25,7 @@ checks out experiment branches where this file does not exist):
 import argparse
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -153,8 +154,12 @@ def run_cmd(cmd, log_path: Path, cwd: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log(f"RUN: {' '.join(str(c) for c in cmd)}")
     log(f"  log -> {log_path}")
+    # No wandb API key is configured on this machine; keep wandb in offline
+    # mode (same as the recorded smoke runs) so runs stay local under the
+    # artifact checkpoint dir.
+    env = dict(os.environ, WANDB_MODE="offline")
     with open(log_path, "w") as f:
-        proc = subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
+        proc = subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, env=env)
     if proc.returncode != 0:
         raise StageError(
             f"command failed with exit code {proc.returncode}; see {log_path}"

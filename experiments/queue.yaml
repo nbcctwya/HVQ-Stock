@@ -25,7 +25,7 @@ experiments:
     name: prior-gated-fusion
     base: main
     branch: exp/002-prior-gated-fusion
-    status: failed
+    status: pending
   - id: "003"
     name: hvq-z0-only
     base: exp/001-hvq-residual-2level
