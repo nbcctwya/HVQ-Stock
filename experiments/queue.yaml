@@ -1,0 +1,17 @@
+# Experiment queue — real queue consumed by the stage-2 executor.
+#
+# Rules (see templates/RULES.md for the full specification):
+#   - Experiments are sorted by id (ascending).
+#   - New experiments are appended only; ids are never renumbered or reused.
+#   - An experiment may enter this queue only after code development is
+#     complete and its smoke test has PASSED.
+#   - New entries always start with status: pending.
+#   - status is one of: pending | running | done | failed
+#
+# Entry format:
+#   - id: "004"                          # three-digit string
+#     name: market-gated-z1              # kebab-case
+#     branch: exp/004-market-gated-z1
+#     status: pending
+
+experiments: []
