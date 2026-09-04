@@ -51,24 +51,33 @@ per-sample 的 gate，自适应决定当前样本中 prior 信息和 latent 信�
 
 Base: main
 Branch: exp/002-prior-gated-fusion
-Commit: 2752a2f（ac5d1f6 初版 gated fusion；2752a2f 修正为 2 倍缩放 +
-gate 显式零初始化，初始输出与原固定融合严格等价）
+Commit: 1d16627（ac5d1f6 初版 gated fusion；2752a2f 修正为 2 倍缩放 +
+gate 显式零初始化，初始输出与原固定融合严格等价；632365c 引入
+artifact_root 产物隔离；1d16627 分支 README 补充 artifact_root 用法）
 
 ## Smoke Test
 
 Status: PASS
 Notes: 单元测试 9/9 通过（`python -m unittest tests.test_gated_fusion`，
 环境 conda `prism-vq`）。Stage 1 smoke：`stage1.py train.num_epochs=1
-train.run_name=gfuse_smoke`，1 epoch 完成，val_loss=0.9228，产出
-`checkpoints/gfuse_smoke-epoch=0-val_loss=0.9228.ckpt`。Stage 2 smoke：
-`stage2.py train.num_epochs=1 train.seed=0
+train.run_name=gfuse_smoke artifact_root=artifacts/002/smoke`，
+1 epoch 完成，val_loss=0.9228，产出
+`artifacts/002/smoke/checkpoints/gfuse_smoke-epoch=0-val_loss=0.9228.ckpt`。
+Stage 2 smoke：`stage2.py train.num_epochs=1 train.seed=0
+artifact_root=artifacts/002/smoke
 predictor.saved_model="gfuse_smoke-epoch=0-val_loss=0.9228.ckpt"`，
-训练 + valid/test 推理全流程完成（Test RankIC 0.0448，仅供流程验证），
-产出 checkpoint 中确认含 `return_predictor.gate.weight`（1×141）且
-weight/bias 已从零初始化更新，证明 gate 端到端参与训练。日志：
-`logs/stage1_gfuse_smoke.log`、`logs/stage2_gfuse_smoke.log`。
-注意：Stage 2 smoke 的预测输出覆盖了 `res/VQ512_csi300_mo2_k1_.../
-0_best.pkl`（该路径按配置参数命名，001 的同名产物被 smoke 结果覆盖）。
+Stage 2 正确从 artifact root 的 checkpoints/ 加载 Stage 1 checkpoint，
+训练 + valid/test 推理全流程完成（Test RankIC 0.0448，与不使用
+artifact_root 的上一轮 smoke 完全一致，仅供流程验证）；全部产物
+（stage1/stage2 checkpoint、wandb 文件、prediction、metric、日志）
+均落在 `artifacts/002/smoke/` 下，项目级 `checkpoints/` 与 `res/`
+经前后 diff 确认无任何写入。产出 checkpoint 中确认含
+`return_predictor.gate.weight`（1×141）且 weight/bias 已从零初始化
+更新，证明 gate 端到端参与训练。
+日志：`artifacts/002/smoke/stage1.log`、`artifacts/002/smoke/stage2.log`。
+注意：更早一轮 smoke（未使用 artifact_root）曾覆盖
+`res/VQ512_csi300_mo2_k1_.../0_best.pkl` 中 001 的同名产物；
+引入 artifact_root 后该问题已消除。
 
 ## Result
 

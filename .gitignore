@@ -1,6 +1,7 @@
 checkpoints/
 res/
 results/
+artifacts/
 dataset/data/
 __pycache__/
 *.pyc
