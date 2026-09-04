@@ -257,7 +257,7 @@ def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
             sys.executable, "stage2.py",
             f"train.seed={STAGE2_SEED}",
             f"artifact_root={artifact_root}",
-            f"predictor.saved_model={ckpt.name}",
+            f'predictor.saved_model="{ckpt.name}"',
         ],
         run_dir / "stage2.log", repo, STAGE2_MAX_ATTEMPTS,
     )
