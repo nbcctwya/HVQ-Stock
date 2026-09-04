@@ -52,10 +52,35 @@
   `train.seed` 为 0；当前筛选阶段所有实验统一使用 `train.seed: 0`
   （只指 Stage 2 使用的 `train.seed`；Stage 1 固定的 seed 42 逻辑
   不得改动）。
+- 每个实验分支的默认 `configs/config.yaml` 必须完整代表该实验：
+  直接运行默认配置（不带任何实验特有 override）即为该实验本身。
+  核心实验改动不得依赖实验特有的 CLI override 才能启用。
+- CLI override 只能用于统一执行层参数，例如 `train.seed`、
+  `train.num_epochs`、`artifact_root`（artifact 输出目录）等；
+  不得用于开启实验的核心改动。
+- 从已有实验 branch 派生新实验时，也必须检查并更新默认 config，
+  使其准确代表新实验（而不是沿用 base 实验的默认值）。
 - queue 条目和 record（`## Git` 的 `Base:`）中的 `base` 必须一致。
 - 一个实验只修改该 Idea 必需的内容，不顺手重构无关代码。
 - 默认保持数据划分、seed、训练协议、回测协议和其他 baseline
   参数不变，除非 Idea 明确要求修改。
+
+### 3.1 Artifact 隔离（artifact_root）
+
+- 运行期产物（checkpoints、预测、回测输出、wandb 文件）必须可以按实验
+  隔离，避免不同实验互相覆盖。
+- 通过统一执行层参数 `artifact_root=<dir>` 指定：设置后
+  `train.save_dir` 重定向为 `<dir>/checkpoints`，`train.save_res`
+  重定向为 `<dir>/res`；Stage 2 解析相对路径的
+  `predictor.saved_model` 时也以该 checkpoint 目录为准。
+  未设置时保持项目默认的 `checkpoints/` 与 `res/`。
+- 建议约定：正式运行用 `artifacts/<ID>/run`，smoke 用
+  `artifacts/<ID>/smoke`。具体实验 ID 不得硬编码进模型代码，
+  只能由调用方（CLI override / 未来执行器）传入。
+- 控制台日志由调用方 shell 重定向到对应 artifact 目录
+  （例如 `> artifacts/<ID>/smoke/stage2.log`），代码内不写死日志路径。
+- `backtest_qlib.py` 已支持 `--pred_path` / `--output_dir`，
+  回测产物跟随预测文件所在目录，无需额外改动。
 
 ### 4. 开发与验证（在实验分支上）
 
