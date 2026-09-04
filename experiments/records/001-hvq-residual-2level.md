@@ -8,7 +8,7 @@
 
 ## Motivation
 
-这是本仓库的首个完整实验，作为后续所有实验的 baseline：
+这是本仓库的首个完整实验，作为本仓库首个改进实验：
 验证残差式 2 级 VQ 能否在保持 IC 的同时改善码本利用与训练稳定性，
 为后续基于 HVQ 的改进（如 market gating）提供对照基准。
 
@@ -38,7 +38,7 @@
 ## Git
 
 Base: main
-Branch: exp/001-hvq-residual-2level（baseline 代码即 main 内容，分支从 main 创建）
+Branch: exp/001-hvq-residual-2level
 Commit: 0a75fd1（训练代码；其后 ab3e117 仅将 Stage 1 checkpoint 名填入 config，不影响训练行为）
 
 ## Smoke Test
