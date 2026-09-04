@@ -93,6 +93,16 @@ conda run -n prism-vq python stage2.py data.universe=csi300 \
 conda run -n prism-vq python -m unittest tests.test_hvq -v
 ```
 
+## 自动实验调度
+
+`experiments/` + `runner/` 是一套轻量级实验调度系统（队列 -> Kimi 实现 ->
+Bash 无人值守训练 -> Kimi 独立验收 -> lab-history），详见
+[experiments/README.md](experiments/README.md)。启动整个队列：
+
+```bash
+bash runner/preflight.sh && bash runner/run_queue.sh
+```
+
 ## 改动点（相对上游 PRISM-VQ）
 
 - 新增 `module/quantise_hvq.py`：`ResidualVectorQuantiser` 与 `create_quantizer`。

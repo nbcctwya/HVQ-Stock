@@ -105,7 +105,7 @@ ok "实验分支 exp/H999-smoke 存在"
 [ -f runner/worktrees/H999/results/H999/metrics.json ] || fail "run.sh 产物不存在"
 ok "run.sh 在 worktree 内执行并产出结果"
 
-git log --oneline main | grep -q "H999: lab record" || fail "main 上没有验收同步 commit"
+git log --oneline --grep="H999: lab record" main | grep . >/dev/null || fail "main 上没有验收同步 commit"
 ok "main 上存在验收同步 commit"
 
 # --- 5. 重启续跑：DONE 必须跳过 ---
