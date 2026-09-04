@@ -83,6 +83,7 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  fusion: 'gated'   # 'fixed' = original alpha + prior + latent; 'gated' = learnable per-sample gate
   
 train:
   seed: 1 # 

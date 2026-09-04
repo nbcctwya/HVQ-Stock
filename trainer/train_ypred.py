@@ -122,10 +122,12 @@ class GenerateReturn(pl.LightningModule):
         )
 
         self.use_prior = config['predictor']['use_prior']
+        self.fusion_mode = config['predictor'].get('fusion', 'fixed')
         # 5. Return Predictor
-        self.return_predictor = ReturnPredictor(num_prior  = self.num_prior_factors, 
+        self.return_predictor = ReturnPredictor(num_prior  = self.num_prior_factors,
                                                 num_latent = self.vq_embed_dim,
-                                                use_prior = self.use_prior)
+                                                use_prior = self.use_prior,
+                                                fusion = self.fusion_mode)
 
         self.n_features = config['vqvae']['num_features']
         self.n_prior_factors = config['vqvae']['num_prior_factors']
@@ -325,21 +327,32 @@ class GenerateReturn(pl.LightningModule):
         self.revin.eval()
 
 class ReturnPredictor(nn.Module):
-    def __init__(self, num_prior, num_latent, use_prior=True):
+    def __init__(self, num_prior, num_latent, use_prior=True, fusion='fixed'):
         super().__init__()
         self.num_prior = num_prior
         self.num_latent = num_latent
         self.use_prior = use_prior
-        
+        assert fusion in ('fixed', 'gated'), f"Unknown fusion mode: {fusion}"
+        self.fusion = fusion
+        if self.fusion == 'gated':
+            # Per-sample scalar gate deciding prior vs latent weight.
+            # Zero-init bias -> gate starts at 0.5 (equal weighting).
+            self.gate = nn.Linear(num_prior + num_latent, 1)
+
     def forward(self, alpha, beta_p, beta_l, f_prior, f_latent):
         prior_term = (beta_p * f_prior).sum(dim=1)
         latent_term = (beta_l * f_latent).sum(dim=1)  # elementwise (B, K)
 
         combined = torch.cat([prior_term.unsqueeze(1), latent_term.unsqueeze(1)], dim=1)
         # intercept_term = self.final_layer(combined).squeeze(-1)
-        
-        if self.use_prior:  
-            output = alpha + prior_term + latent_term # + intercept_term
+
+        if self.use_prior:
+            if self.fusion == 'gated':
+                gate_input = torch.cat([f_prior, f_latent], dim=1)  # (B, P+K)
+                gate = torch.sigmoid(self.gate(gate_input)).squeeze(-1)  # (B,)
+                output = alpha + gate * prior_term + (1.0 - gate) * latent_term
+            else:
+                output = alpha + prior_term + latent_term # + intercept_term
         else:
             output = alpha + latent_term
 
