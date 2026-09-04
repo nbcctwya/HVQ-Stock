@@ -16,7 +16,7 @@ from qlib.data.dataset import DataHandlerLP, TSDatasetH
 
 from dataset.dataset import init_data_loader
 from trainer.train_vqvae import FactorVQVAE
-from utils import get_root_dir, load_yaml_param_settings, seed_everything
+from utils import get_root_dir, load_yaml_param_settings, seed_everything, apply_artifact_root
 from utils.wandb import make_wandb_config
 
 torch.set_float32_matmul_precision('high')
@@ -184,6 +184,10 @@ def _prepare_dataset(cfg: DictConfig,
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    artifact_root = apply_artifact_root(cfg)
+    if artifact_root:
+        print(f"Artifact root: {artifact_root} (checkpoints/res redirected)")
+
     # Freeze the config at launch so mid-run mutations are ignored
     frozen_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     OmegaConf.set_readonly(frozen_cfg, True)

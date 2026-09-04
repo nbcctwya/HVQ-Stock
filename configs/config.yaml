@@ -1,3 +1,12 @@
+# Optional artifact isolation root (execution-layer parameter).
+# When set, e.g. `artifact_root=artifacts/002/run`, all run artifacts are
+# redirected under it: <artifact_root>/checkpoints (incl. wandb files) and
+# <artifact_root>/res (predictions/metrics). Stage 2 also resolves a relative
+# `predictor.saved_model` against the effective checkpoint dir, so it loads
+# Stage 1 checkpoints from the same artifact root.
+# null (default) keeps the original project-level checkpoints/ and res/.
+artifact_root: null
+
 vqvae:
   num_features: 158
   seq_len: 20 

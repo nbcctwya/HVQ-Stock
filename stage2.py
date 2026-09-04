@@ -26,7 +26,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from dataset.dataset import init_data_loader
 from trainer.train_ypred import GenerateReturn
 from utils import (get_root_dir, log_metrics_as_bar_chart, run_inference,
-                   seed_everything)
+                   seed_everything, apply_artifact_root)
 from utils.wandb import make_wandb_config
 
 torch.set_float32_matmul_precision('high')
@@ -342,7 +342,10 @@ def _make_absolute_saved_model_path(config_dict: dict) -> dict:
     saved_model = model_config['predictor']['saved_model']
     saved_model_path = Path(saved_model)
     if not saved_model_path.is_absolute():
-        saved_model_path = Path(get_root_dir()) / 'checkpoints' / saved_model_path
+        # Resolve against the effective checkpoint dir (train.save_dir), so an
+        # artifact_root override also relocates Stage 1 checkpoint loading.
+        save_dir = model_config.get('train', {}).get('save_dir', 'checkpoints')
+        saved_model_path = Path(get_root_dir()) / save_dir / saved_model_path
     model_config['predictor']['saved_model'] = str(saved_model_path)
     return model_config
 
@@ -438,6 +441,10 @@ def main(cfg: DictConfig) -> float:
             f"Applied stage2 preset for {base_cfg.data.universe}: "
             f"{', '.join(applied_preset_paths)}"
         )
+
+    artifact_root = apply_artifact_root(base_cfg)
+    if artifact_root:
+        print(f"Artifact root: {artifact_root} (checkpoints/res redirected)")
 
     frozen_cfg = OmegaConf.create(OmegaConf.to_container(base_cfg, resolve=True))
     OmegaConf.set_readonly(frozen_cfg, True)

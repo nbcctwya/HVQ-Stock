@@ -7,9 +7,16 @@
 
 - `main` 只负责保存 `experiments/queue.yaml` 和 `experiments/records/`
   （以及本框架自身的模板文件）。`main` 上不出现任何实验性代码改动。
+- `main` 根目录的 `README.md` 永远保留原始 PRISM-VQ 的项目说明，
+  不得在 `main` 上修改。
 - `exp/<ID>-<name>` 实验分支只保存该实验的代码改动，
   不在实验分支上创建 record 或修改 queue。
-- 因此实验代码与实验元数据严格分离：代码在 exp 分支，
+- 每个 `exp/<ID>-<name>` 实验分支都必须将根目录 `README.md` 改写为
+  该实验自己的说明，内容至少包括：Base、Idea / Motivation、核心修改、
+  与 base 的区别、smoke 状态。分支 README 属于实验分支自身，
+  随实验代码一起提交到 exp 分支；但 `queue.yaml` 和 `records/`
+  仍然只允许在 `main` 上修改。
+- 因此实验代码与实验元数据严格分离：代码（含分支 README）在 exp 分支，
   队列与记录永远只在 `main`。
 
 ## 创建一个新实验的流程
@@ -32,13 +39,48 @@
 - 实验记录文件名必须为：`records/<ID>-<name>.md`。
 - ID、名称、分支名、记录文件名、queue 条目必须一一对应。
 
-### 3. 创建实验分支
+### 3. 创建实验分支（base 规则）
 
 - 必须先创建实验分支，再修改任何代码。
-- 每个实验分支默认从 `main` 创建，除非用户明确指定其他 base。
+- 新实验默认从 `main` 创建，此时 `base: main`。
+- 只有当用户明确指定"基于某个已有实验继续开发"时，才从该实验的
+  `branch` 创建，此时 `base` 填该分支名（例如
+  `base: exp/001-hvq-residual-2level`）。
+- 不要自动推断继承关系；用户未明确指定时，始终使用 `main`。
+- 创建分支前必须先确认 `base` 分支真实存在（`git rev-parse --verify`）。
+- 创建新实验分支后，必须确认 `configs/config.yaml` 中默认
+  `train.seed` 为 0；当前筛选阶段所有实验统一使用 `train.seed: 0`
+  （只指 Stage 2 使用的 `train.seed`；Stage 1 固定的 seed 42 逻辑
+  不得改动）。
+- 每个实验分支的默认 `configs/config.yaml` 必须完整代表该实验：
+  直接运行默认配置（不带任何实验特有 override）即为该实验本身。
+  核心实验改动不得依赖实验特有的 CLI override 才能启用。
+- CLI override 只能用于统一执行层参数，例如 `train.seed`、
+  `train.num_epochs`、`artifact_root`（artifact 输出目录）等；
+  不得用于开启实验的核心改动。
+- 从已有实验 branch 派生新实验时，也必须检查并更新默认 config，
+  使其准确代表新实验（而不是沿用 base 实验的默认值）。
+- queue 条目和 record（`## Git` 的 `Base:`）中的 `base` 必须一致。
 - 一个实验只修改该 Idea 必需的内容，不顺手重构无关代码。
 - 默认保持数据划分、seed、训练协议、回测协议和其他 baseline
   参数不变，除非 Idea 明确要求修改。
+
+### 3.1 Artifact 隔离（artifact_root）
+
+- 运行期产物（checkpoints、预测、回测输出、wandb 文件）必须可以按实验
+  隔离，避免不同实验互相覆盖。
+- 通过统一执行层参数 `artifact_root=<dir>` 指定：设置后
+  `train.save_dir` 重定向为 `<dir>/checkpoints`，`train.save_res`
+  重定向为 `<dir>/res`；Stage 2 解析相对路径的
+  `predictor.saved_model` 时也以该 checkpoint 目录为准。
+  未设置时保持项目默认的 `checkpoints/` 与 `res/`。
+- 建议约定：正式运行用 `artifacts/<ID>/run`，smoke 用
+  `artifacts/<ID>/smoke`。具体实验 ID 不得硬编码进模型代码，
+  只能由调用方（CLI override / 未来执行器）传入。
+- 控制台日志由调用方 shell 重定向到对应 artifact 目录
+  （例如 `> artifacts/<ID>/smoke/stage2.log`），代码内不写死日志路径。
+- `backtest_qlib.py` 已支持 `--pred_path` / `--output_dir`，
+  回测产物跟随预测文件所在目录，无需额外改动。
 
 ### 4. 开发与验证（在实验分支上）
 
@@ -52,9 +94,9 @@
 2. 切回 `main`。
 3. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
-   Modification、Constraints、Git（Branch 填 exp 分支名，
-   Commit 填实验分支上的代码 commit hash）、Smoke Test。
-   Result 保持 `Status: PENDING`，Conclusion 留空。
+   Modification、Constraints、Git（Base 填创建分支所用的 base，
+   Branch 填 exp 分支名，Commit 填实验分支上的代码 commit hash）、
+   Smoke Test。Result 保持 `Status: PENDING`，Conclusion 留空。
 4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
    （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
 5. 在 `main` 上 commit record + queue 的变更。

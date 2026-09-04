@@ -42,6 +42,22 @@ def get_root_dir():
     return Path(__file__).parent.parent
 
 
+def apply_artifact_root(cfg):
+    """Redirect artifact directories under ``cfg.artifact_root`` when set.
+
+    Must be called before the config is frozen. Rewrites ``train.save_dir``
+    to ``<artifact_root>/checkpoints`` and ``train.save_res`` to
+    ``<artifact_root>/res``. Returns the root string, or None when unset.
+    """
+    root = cfg.get('artifact_root')
+    if not root:
+        return None
+    root = str(root).rstrip('/')
+    cfg.train.save_dir = f'{root}/checkpoints'
+    cfg.train.save_res = f'{root}/res'
+    return root
+
+
 def save_model(models_dict: dict, dirname='res', id: str = ''):
     """
     :param models_dict: {'model_name': model, ...}
