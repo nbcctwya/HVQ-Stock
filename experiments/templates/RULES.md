@@ -3,6 +3,15 @@
 本文件定义第一阶段的实验创建流程。任何 AI 在本仓库中创建新实验时，
 必须先完整阅读本文件，并严格遵守。
 
+## 仓库所有权规则（最重要）
+
+- `main` 只负责保存 `experiments/queue.yaml` 和 `experiments/records/`
+  （以及本框架自身的模板文件）。`main` 上不出现任何实验性代码改动。
+- `exp/<ID>-<name>` 实验分支只保存该实验的代码改动，
+  不在实验分支上创建 record 或修改 queue。
+- 因此实验代码与实验元数据严格分离：代码在 exp 分支，
+  队列与记录永远只在 `main`。
+
 ## 创建一个新实验的流程
 
 ### 1. 读取现状
@@ -15,6 +24,8 @@
 
 - 找到历史最大实验 ID（综合 `queue.yaml` 和 `records/` 中的所有 ID）。
 - 新实验 ID = 最大 ID + 1，固定为三位数字字符串（例如 `"004"`）。
+- 如果当前没有任何历史实验，第一个实验编号从 `001` 开始；
+  不存在 `000` 实验。
 - 已使用过的 ID 永不复用，即使对应实验 failed 或被废弃。
 - 根据用户 Idea 生成简短、可读的 kebab-case 名称（例如 `market-gated-z1`）。
 - 分支名必须为：`exp/<ID>-<name>`，例如 `exp/004-market-gated-z1`。
@@ -29,21 +40,24 @@
 - 默认保持数据划分、seed、训练协议、回测协议和其他 baseline
   参数不变，除非 Idea 明确要求修改。
 
-### 4. 开发与验证
+### 4. 开发与验证（在实验分支上）
 
 - 开发完成后必须执行单元测试和最小 smoke test。
 - smoke test 失败时继续修复；修复前不允许进入下一步，
   更不允许加入 queue。
 
-### 5. 收尾（仅在 smoke PASS 之后，按顺序执行）
+### 5. 收尾（严格按顺序执行）
 
-1. commit 实验代码（在实验分支上）。
-2. 按 `templates/experiment.template.md` 创建
+1. 在实验分支上 commit 实验代码（仅代码改动）。
+2. 切回 `main`。
+3. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
-   Modification、Constraints、Git（Branch + Commit）、Smoke Test。
+   Modification、Constraints、Git（Branch 填 exp 分支名，
+   Commit 填实验分支上的代码 commit hash）、Smoke Test。
    Result 保持 `Status: PENDING`，Conclusion 留空。
-3. 向 `experiments/queue.yaml` 追加该实验（按 id 顺序，追加到末尾），
-   初始状态必须为 `pending`。
+4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
+   （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
+5. 在 `main` 上 commit record + queue 的变更。
 
 ### 6. 边界
 
@@ -55,7 +69,8 @@
 
 ## 第二阶段（执行器）的职责边界
 
-- 执行器只消费 queue 中 `pending` 的实验，按 ID 顺序执行。
-- 执行器负责补充记录中的 Result 部分，并将 queue 状态更新为
-  `done` 或 `failed`；必要时填写 Conclusion。
+- 执行器只消费 queue 中 `pending` 的实验，按 ID 顺序执行；
+  执行时切到对应的 exp 分支，完成后回到 `main` 更新元数据。
+- 执行器负责在 `main` 上补充记录中的 Result 部分，并将 queue
+  状态更新为 `done` 或 `failed`；必要时填写 Conclusion。
 - 执行器不创建新实验、不修改实验代码、不改动 ID 与命名。

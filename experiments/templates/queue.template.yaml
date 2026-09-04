@@ -4,6 +4,7 @@
 #
 # Field specification:
 #   id      : three-digit string, zero-padded, e.g. "004".
+#             The first experiment starts at "001"; there is no "000".
 #             New id = max(existing ids) + 1. Ids are never reused,
 #             even for failed experiments.
 #   name    : short, readable kebab-case name derived from the idea.
@@ -19,7 +20,7 @@
 # updated on existing entries.
 
 experiments:
-  - id: "000"
+  - id: "001"
     name: example-entry
-    branch: exp/000-example-entry
+    branch: exp/001-example-entry
     status: pending

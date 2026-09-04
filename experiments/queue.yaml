@@ -14,4 +14,8 @@
 #     branch: exp/004-market-gated-z1
 #     status: pending
 
-experiments: []
+experiments:
+  - id: "001"
+    name: hvq-residual-2level
+    branch: main
+    status: done
