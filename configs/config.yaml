@@ -11,10 +11,6 @@ vqvae:
     num_layers: 1
 
   quantizer:
-    # type: 'single' 保持 PRISM-VQ 原行为；'hvq' 启用残差式层次化量化（ResidualVectorQuantiser）
-    type: 'single'
-    num_levels: 2
-    level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
     decay: 0.95
     commit_weight: 0.25
     distance: 'l2'
@@ -38,8 +34,6 @@ vqvae:
 data:
   universe: 'csi300'
   data_path: 'dataset/data'
-  # 预处理 pickle 所在目录；默认复用 PRISM-VQ 已生成的数据，避免重复处理 9GB 数据
-  pickle_dir: '../PRISM-VQ/dataset/data'
   window_size: 20
   step: 1
   train_period : ["2009-01-01", "2020-12-31"]  # 12 years
@@ -49,24 +43,21 @@ data:
 stage2_presets:
   csi300:
     predictor:
-      # Stage 1 训练完成后在此填写生成的 checkpoint 文件名（checkpoints/ 目录下）
-      saved_model: "hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt"
+      saved_model: "infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=9-val_loss=0.5682.ckpt"
       aux_weight: 0.01
       n_expert: 2
       transformer:
         num_heads: 2
   sp500:
     predictor:
-      # Stage 1 训练完成后在此填写生成的 checkpoint 文件名（checkpoints/ 目录下）
-      saved_model: ""
+      saved_model: "infusp500_h128_VQK512_C128_emb128_dl2p10_s42-epoch=1-val_loss=0.7590.ckpt"
       aux_weight: 0.001
       n_expert: 8
       transformer:
         num_heads: 4
 
 predictor: 
-  # Stage 1 训练完成后在此（或 stage2_presets）填写生成的 checkpoint 文件名
-  saved_model: ""
+  saved_model: "infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=9-val_loss=0.5682.ckpt"
   num_features: 158
   individual: False
   aux_weight: 0.01

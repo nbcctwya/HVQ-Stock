@@ -12,7 +12,6 @@ from module.bidirectional import LoadingGenerator
 from utils import get_root_dir, calc_ic
 from utils.rankloss import RankLoss
 from module.quantise import VectorQuantiser
-from module.quantise_hvq import create_quantizer
 from module.layers.encoder import SpatialEncoder
 from module.layers.decoder import ReconstructionDecoder
 from module.layers.src import RevIN
@@ -83,8 +82,16 @@ class GenerateReturn(pl.LightningModule):
             final_embed_dim_d=self.vq_embed_dim
         )
 
-        # 2. Vector Quantizer（按 quantizer.type 选择单层或残差式 HVQ）
-        self.quantizer = create_quantizer(vqvae_cfg)
+        # 2. Vector Quantizer
+        self.quantizer = VectorQuantiser(
+            num_embed=self.num_embed,         # K
+            embed_dim=self.vq_embed_dim,      # d
+            beta=self.commit_weight,
+            distance=vqvae_cfg['quantizer']['distance'],
+            anchor=vqvae_cfg['quantizer']['anchor'],
+            first_batch=vqvae_cfg['quantizer']['first_batch'],
+            contras_loss=vqvae_cfg['quantizer']['contras_loss']
+        )
         
         # 3. RevIN
         self.revin = RevIN(self.num_features)
@@ -303,14 +310,6 @@ class GenerateReturn(pl.LightningModule):
         print(f"--- Encoder loaded: missing={len(missing_encoder)}, unexpected={len(unexpected_encoder)}")
         print(f"--- Quantizer loaded: missing={len(missing_quantizer)}, unexpected={len(unexpected_quantizer)}")
         print(f"--- RevIN loaded: missing={len(missing_revin)}, unexpected={len(unexpected_revin)}")
-
-    def train(self, mode=True):
-        # Lightning 训练时会对整个模块调用 .train()，递归地把 quantizer 重新置为
-        # training mode；VectorQuantiser 在 training mode 下会用 .data 改写 codebook
-        # （dead-code 重初始化），requires_grad=False 无法阻止，因此这里强制其保持 eval。
-        super().train(mode)
-        self.quantizer.eval()
-        return self
 
     def freeze_vqvae(self):
         for param in self.encoder.parameters():

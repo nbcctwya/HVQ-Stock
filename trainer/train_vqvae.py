@@ -57,9 +57,7 @@ class FactorVQVAE(pl.LightningModule):
         self.log('train_vq_loss', vq_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_pred_loss', pred_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # Collect vq_dict['vq_dict_i'] values
-        # HVQ 下 encoding_indices 为按级的 list，取第 0 级用于 codebook 利用率统计
-        codes = encoding_indices[0] if isinstance(encoding_indices, list) else encoding_indices
-        self.epoch_vq_codes.append(codes.detach().cpu().numpy())
+        self.epoch_vq_codes.append(encoding_indices.detach().cpu().numpy())
 
         return {"loss": total_loss, "recon_loss": recon_loss, "vq_loss": vq_loss, "pred_loss": pred_loss}
     

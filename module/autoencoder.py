@@ -5,7 +5,6 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 from module.quantise import VectorQuantiser
-from module.quantise_hvq import create_quantizer
 from module.layers import ReconstructionDecoder
 from module.layers import SpatialEncoder
 from module.layers import SequencePredictorGRU
@@ -49,8 +48,15 @@ class VQVAE(nn.Module):
             final_embed_dim_d=self.vq_embed_dim
         )
 
-        # 按 quantizer.type 选择单层 VectorQuantiser 或残差式 ResidualVectorQuantiser
-        self.quantizer = create_quantizer(vqvae_cfg)
+        self.quantizer = VectorQuantiser(
+            num_embed=self.num_embed,         # K
+            embed_dim=self.vq_embed_dim,      # d
+            beta=self.commit_weight,
+            distance=vqvae_cfg['quantizer']['distance'],
+            anchor=vqvae_cfg['quantizer']['anchor'],
+            first_batch=vqvae_cfg['quantizer']['first_batch'],
+            contras_loss=vqvae_cfg['quantizer']['contras_loss']
+        )
 
         self.decoder = ReconstructionDecoder(
             latent_dim=self.vq_embed_dim,      # d

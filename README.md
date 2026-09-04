@@ -1,107 +1,140 @@
-# HVQ-Stock
+# Vector-Quantized Discrete Latent Factors Meet Financial Priors: Dynamic Cross-Sectional Stock Ranking Prediction for Portfolio Construction
 
-层次化向量量化（Hierarchical VQ / Residual VQ）股票预测实验仓库。代码以
-[PRISM-VQ](../PRISM-VQ)（IJCAI-ECAI 2026）为底，在其两阶段框架上将 Stage 1 的
-单层 `VectorQuantiser` 扩展为**残差式多级量化器 `ResidualVectorQuantiser`**，
-用于对比离散表示容量对收益预测的影响。实验市场：CSI300。
+<div align="center">
 
-## 与上游 PRISM-VQ 的关系
+[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-red.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Status](https://img.shields.io/badge/Status-Accepted-brightgreen.svg)](https://github.com)
 
-- 全部训练/评估代码拷贝自 `../PRISM-VQ`，仅做最小改动（见下文"改动点"）。
-- 量化器接口保持兼容：`forward(h_batch)` 输入 `(N_t, 128)`，返回
-  `(z_q, vq_loss, (perplexity, min_encodings, encoding_indices))`，z_q 走 STE。
-- 默认配置 `vqvae.quantizer.type: 'single'` 时行为与上游完全一致。
-- 不复制上游的大制品：数据集（`dataset/data/`，9GB）、checkpoints、结果文件。
-  预处理 pickle 默认直接读取 `../PRISM-VQ/dataset/data`（见"数据路径配置"）。
+</div>
 
-## 目录结构
+This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
 
-```text
-stage1.py               Stage 1：训练 VQ-VAE 表征模型（固定 seed 42）
-stage2.py               Stage 2：加载 Stage 1 checkpoint，训练收益预测模型
-module/
-  quantise.py           上游单层 VectorQuantiser（未改动）
-  quantise_hvq.py       新增：ResidualVectorQuantiser + create_quantizer 工厂
-  autoencoder.py        VQVAE（量化器实例化改为走 create_quantizer）
-trainer/
-  train_vqvae.py        Stage 1 Lightning 模块
-  train_ypred.py        Stage 2 Lightning 模块（工厂分支 + codebook 冻结修复）
-  train_ypred_*.py      上游消融变体（未改动，不支持 hvq 开关）
-configs/config.yaml     全部实验配置
-dataset/                数据预处理脚本与 universe 配置（不含 data/）
-tests/                  单元测试
-scripts/ utils/         上游工具脚本
-```
+## Baseline Results Protocol v1.0
 
-## 残差式层次化量化器（HVQ）
-
-`module/quantise_hvq.py::ResidualVectorQuantiser` 用 `nn.ModuleList` 堆叠
-`num_levels` 个上游 `VectorQuantiser`：
-
-- 第 0 级量化编码器输出 `h`；第 l 级量化前级残差 `r = h - sum(z_q_j)`。
-- 最终 `z_q = sum(z_q_l)`，整体 STE：`z_q_output = h + (z_q - h).detach()`。
-- 总 vq_loss 为各级 loss 之和（各级内部已含 beta commitment + codebook loss；
-  `contras_loss` 逐层按各自残差计算）。
-- 每一级有独立的 codebook 与 FeaturePool，dead-code 重初始化逻辑（training mode
-  下自动生效）逐层独立保留。
-- 返回签名与单层一致，但 perplexity / encodings / indices 为长度为
-  `num_levels` 的按级 list（Stage 2 forward 只用 z_q，不受影响；Stage 1 的
-  codebook 利用率统计取第 0 级）。
-
-## 配置开关
-
-`configs/config.yaml`：
-
-```yaml
-vqvae:
-  quantizer:
-    type: 'single'            # 'single'（默认，原行为）或 'hvq'
-    num_levels: 2             # hvq 量化级数
-    level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
-```
-
-Stage 1 与 Stage 2 通过同一个 `create_quantizer` 工厂实例化量化器，两阶段共用
-一份 config 即可保证 checkpoint 参数命名（`quantizer.` / `quantizer.levels.*`）
-严格匹配。
-
-## 数据路径配置
-
-预处理 pickle 目录优先读 `data.pickle_dir`（默认 `../PRISM-VQ/dataset/data`，
-即复用 PRISM-VQ 已生成的数据），缺省回退 `data.data_path`；文件名拼接逻辑不变
-（`<universe>_<window>_h<pred_len>_dl2_{train,valid,test}.pkl`，位于
-`<pickle_dir>/<region>/` 下）。如需自行生成数据，用 `dataset/get_dataset.py`
-生成后修改 `data.pickle_dir` 指向即可。
-
-## 运行
+The repository includes a non-invasive adapter that evaluates the existing
+CSI300 and S&P 500 seed predictions under a common Qlib protocol.  It does not
+replace training or the project's native backtest outputs.  Generate and
+validate the comparable artifacts with:
 
 ```bash
-# Stage 1（HVQ 版本）
-conda run -n prism-vq python stage1.py data.universe=csi300 \
-  vqvae.quantizer.type=hvq
-
-# Stage 2：先在 configs/config.yaml 的 stage2_presets.<universe>.predictor.saved_model
-# 填入 Stage 1 生成的 checkpoint 文件名，然后：
-conda run -n prism-vq python stage2.py data.universe=csi300 \
-  vqvae.quantizer.type=hvq train.seed=0
+conda run -n prism-vq python generate_baseline_results.py --out results
+conda run -n prism-vq python inspect_eval_results.py --out results
+conda run -n prism-vq python -m unittest -v tests/test_protocol_metrics.py
 ```
 
-多 seed sweep：`python stage2.py -m data.universe=csi300 vqvae.quantizer.type=hvq train.seed=0,1,2,3,4`
+`results/metrics/` contains numeric seed, aggregate, and independently
+re-backtested ensemble metrics.  `results/tables/` contains four-decimal
+display tables only, `results/curves/ensemble/` contains daily gross return,
+cost, net return, benchmark return, and NAV series, and `results/metadata/`
+records the discovered data split and complete evaluation convention.
+`results/diagnostics/validation.json` is the machine-readable validation
+report.  No extra cache or artifact directory is written inside `results/`;
+the validator reconstructs the ensemble score from the seed predictions when
+needed.
 
-## 单元测试
+Prediction metrics are daily cross-sectional Pearson IC and Spearman RankIC;
+their IR values use daily sample standard deviation (`ddof=1`) without annual
+scaling.  Portfolio metrics use `log1p(gross_return - cost)`, 252 trading days,
+sample standard deviation, zero risk-free rate, and zero daily MAR.  The
+protocol backtest uses Qlib `TopkDropoutStrategy` with TopK=30, DropN=5 and the
+full fixed configuration recorded in `results/metadata/eval_config.json`.
+
+📄 **Paper**: Accepted at IJCAI-ECAI 2026
+
+---
+
+## 📋 Abstract
+
+Stock return prediction presents several unique challenges that motivate our architectural design. Financial time series exhibit extremely low signal-to-noise ratios, with predictable components often masked by market microstructure noise and idiosyncratic shocks. Additionally, stocks do not evolve independently—their returns exhibit complex cross-sectional dependencies driven by industry relationships, supply chain connections, and correlated investor behavior. Market regimes shift over time, requiring models to adapt factor loadings dynamically rather than assuming stationarity. Finally, practitioners require interpretable models that align with financial theory, as black-box predictions are difficult to validate and deploy in regulated environments.
+
+<div align="center">
+  <img src="images/detailed-prism.png" alt="PRISM-VQ Architecture" width="100%"/>
+  <p><em>Architecture of PRISM-VQ. The spatial learning stage (left) learns discrete stock representations via vector quantization over cross-sectional features. The temporal learning stage (right) uses these discrete codes to gate expert networks, generating dynamic factor loadings that fuse expert prior factors and learned latent factors for return prediction.</em></p>
+</div>
+
+## 🎯 Key Contributions
+
+- **Unified Framework**: We propose PRISM-VQ, a unified dynamic factor model that systematically integrates expert prior factors, data-driven discrete latent factors, and adaptive temporal modeling. To our knowledge, this is the first framework to combine these three components within a principled factor model structure.
+
+- **Vector Quantization**: We introduce vector quantization as an inductive bias for learning robust cross-sectional factors in financial markets. We demonstrate that discrete representations provide superior regularization compared to continuous alternatives in low signal-to-noise environments.
+
+## 🚀 Installation
+
+### 📦 Requirements
+
+```
+Python 3.11
+PyTorch 2.4.1
+Qlib 0.9.6.99
+Hydra & OmegaConf
+```
+
+### 🔧 Setup
 
 ```bash
-conda run -n prism-vq python -m unittest tests.test_hvq -v
+# Clone the repository
+git clone https://github.com/x7jeon8gi/PRISM-VQ.git
+cd PRISM-VQ
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-## 改动点（相对上游 PRISM-VQ）
+## 📊 Data Preparation
 
-- 新增 `module/quantise_hvq.py`：`ResidualVectorQuantiser` 与 `create_quantizer`。
-- `module/autoencoder.py`、`trainer/train_ypred.py`：量化器实例化改为工厂分支。
-- `trainer/train_vqvae.py`：codebook 利用率统计兼容 hvq 的按级 indices list（取第 0 级）。
-- `trainer/train_ypred.py::GenerateReturn`：覆写 `train()`，强制 quantizer 保持 eval，
-  修复 Lightning 递归 `.train()` 导致已冻结 codebook 在 training mode 下被 `.data`
-  改写（dead-code 重初始化）的漏洞。
-- `stage1.py` / `stage2.py`：pickle 目录支持 `data.pickle_dir`。
-- `configs/config.yaml`：新增 quantizer `type` / `num_levels` / `level_num_embed`、
-  `data.pickle_dir`；`stage2_presets` 的 `saved_model` 置空待训练后填写。
-- 新增 `tests/test_hvq.py`。
+The model uses two data sources:
+
+1. **Qlib Data**: Stock market data from Qlib's data repository
+2. **JKP Global Factors**: Jensen, Kelly, and Pedersen (JKP) global factor data
+
+
+## 🏋️ Training
+
+The model training consists of two stages:
+
+### Stage 1: VQ-VAE Training
+```bash
+python stage1.py
+```
+
+### Stage 2: Predictive Model Training
+```bash
+python stage2.py
+```
+
+### ⚙️ Configuration
+
+All model configurations are managed through Hydra configuration files located in `configs/`. Key parameters include:
+
+- `data.universe`: Choose between 'sp500' or 'csi300'
+- `vqvae.num_embed`: Number of codebook entries
+- `predictor.n_expert`: Number of experts in MoE
+- `stage2_presets`: Market-specific Stage 2 defaults for checkpoint, auxiliary weight, MoE experts, and attention heads. `stage2.py` applies these automatically from `data.universe`.
+
+
+## 📁 Project Structure
+
+```
+PRISM-VQ/
+├── 📂 configs/           # Hydra configuration files
+├── 📂 dataset/           # Data loading and processing
+├── 📂 module/            # Model architecture components
+│   ├── 📄 autoencoder.py
+│   ├── 📄 quantise.py
+│   └── 📂 layers/
+├── 📂 trainer/           # Training scripts
+├── 📂 utils/             # Utility functions
+├── 🚀 stage1.py          # Stage 1 training entry point
+└── 🚀 stage2.py          # Stage 2 training entry point
+```
+
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+We thank the Qlib team for providing the financial data infrastructure and the authors of the JKP factors for making their data publicly available. We also acknowledge the [CVQ-VAE](https://github.com/lyndonzheng/CVQ-VAE) project for inspiration on vector quantization techniques.

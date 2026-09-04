@@ -306,8 +306,7 @@ def _resolve_universe(universe: str) -> Tuple[str, str]:
 def _prepare_dataloaders(cfg: DictConfig,
                          region_code: str,
                          universe_prefix: str):
-    # 优先使用 data.pickle_dir（预处理 pickle 目录），缺省回退到 data.data_path
-    data_path = _resolve_data_path(cfg.data.get('pickle_dir') or cfg.data.get('data_path'))
+    data_path = _resolve_data_path(cfg.data.get('data_path'))
     horizon = cfg.vqvae.predictor.pred_len
     window_size = cfg.data.window_size
     base = f"{universe_prefix}_{window_size}_h{horizon}_dl2"
