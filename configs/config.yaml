@@ -21,7 +21,8 @@ vqvae:
 
   quantizer:
     # type: 'single' 保持 PRISM-VQ 原行为；'hvq' 启用残差式层次化量化（ResidualVectorQuantiser）
-    type: 'single'
+    # 本实验（001）默认即为 'hvq'，直接运行默认配置就是该实验本身。
+    type: 'hvq'
     num_levels: 2
     level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
     decay: 0.95

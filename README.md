@@ -21,7 +21,8 @@ codebook（256 + 256）替代单层 512 codebook，验证残差式 2 级 VQ 能�
 - 全部训练/评估代码拷贝自 `../PRISM-VQ`，仅做最小改动（见下文"改动点"）。
 - 量化器接口保持兼容：`forward(h_batch)` 输入 `(N_t, 128)`，返回
   `(z_q, vq_loss, (perplexity, min_encodings, encoding_indices))`，z_q 走 STE。
-- 默认配置 `vqvae.quantizer.type: 'single'` 时行为与上游完全一致。
+- 本实验分支的默认配置即为 `vqvae.quantizer.type: 'hvq'`（实验本身，
+  直接运行默认配置即可）；手动改为 `'single'` 可回退到与上游完全一致的行为。
 - 不复制上游的大制品：数据集（`dataset/data/`，9GB）、checkpoints、结果文件。
   预处理 pickle 默认直接读取 `../PRISM-VQ/dataset/data`（见"数据路径配置"）。
 
@@ -66,7 +67,7 @@ scripts/ utils/         上游工具脚本
 ```yaml
 vqvae:
   quantizer:
-    type: 'single'            # 'single'（默认，原行为）或 'hvq'
+    type: 'hvq'               # 本实验默认即为 'hvq'；'single' 为上游原行为
     num_levels: 2             # hvq 量化级数
     level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
 ```
@@ -85,18 +86,27 @@ Stage 1 与 Stage 2 通过同一个 `create_quantizer` 工厂实例化量化器�
 
 ## 运行
 
-```bash
-# Stage 1（HVQ 版本）
-conda run -n prism-vq python stage1.py data.universe=csi300 \
-  vqvae.quantizer.type=hvq
+默认配置即为本实验（HVQ），无需额外 override 启用核心改动：
 
-# Stage 2：先在 configs/config.yaml 的 stage2_presets.<universe>.predictor.saved_model
-# 填入 Stage 1 生成的 checkpoint 文件名，然后：
-conda run -n prism-vq python stage2.py data.universe=csi300 \
-  vqvae.quantizer.type=hvq train.seed=0
+```bash
+# Stage 1（HVQ）
+conda run -n prism-vq python stage1.py data.universe=csi300
+
+# Stage 2：configs/config.yaml 的 stage2_presets.csi300.predictor.saved_model
+# 已填入本实验 Stage 1 checkpoint；直接运行：
+conda run -n prism-vq python stage2.py data.universe=csi300
 ```
 
-多 seed sweep：`python stage2.py -m data.universe=csi300 vqvae.quantizer.type=hvq train.seed=0,1,2,3,4`
+CLI override 仅用于统一执行层参数，例如：
+
+```bash
+# 多 seed sweep
+python stage2.py -m data.universe=csi300 train.seed=0,1,2,3,4
+
+# artifact 隔离：checkpoints/res 落到 artifacts/001/run/ 下，
+# Stage 2 也会从该目录加载 Stage 1 checkpoint
+python stage2.py data.universe=csi300 artifact_root=artifacts/001/run
+```
 
 ## 单元测试
 
