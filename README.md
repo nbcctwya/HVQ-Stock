@@ -53,6 +53,28 @@ PASS — 单元测试 9/9 通过；Stage 1 smoke（1 epoch，
 `return_predictor.gate` 参数存在且参与训练。
 日志见 `logs/stage1_gfuse_smoke.log`、`logs/stage2_gfuse_smoke.log`。
 
+## 运行与 artifact 隔离
+
+默认配置即为本实验（gated fusion + seed 0），无需实验特有 override。
+CLI override 仅用于统一执行层参数，例如用 `artifact_root` 把全部产物
+隔离到实验专属目录（checkpoints、res、wandb 文件都会落在其下，
+Stage 2 也会从该目录的 checkpoints/ 加载 Stage 1 checkpoint）：
+
+```bash
+# Stage 1
+python stage1.py artifact_root=artifacts/002/run
+
+# Stage 2（saved_model 为相对文件名时，从 <artifact_root>/checkpoints 解析）
+python stage2.py artifact_root=artifacts/002/run \
+  predictor.saved_model="<stage1_ckpt_name>"
+
+# 回测产物跟随 --pred_path / --output_dir，天然隔离
+python backtest_qlib.py --pred_path artifacts/002/run/res/<run>/0_best.pkl \
+  --universe csi300
+```
+
+不传 `artifact_root` 时行为与上游一致（项目级 `checkpoints/` 与 `res/`）。
+
 ---
 
 原始 PRISM-VQ 项目说明见 `main` 分支的 README。
