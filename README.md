@@ -1,3 +1,14 @@
+# exp/001 — hvq-residual-2level
+
+- Base: `main`（原始 PRISM-VQ）
+- Branch: `exp/001-hvq-residual-2level`
+
+## Idea / Motivation
+
+在 PRISM-VQ 基础上引入残差式层次化向量量化（Residual HVQ），用 2 级
+codebook（256 + 256）替代单层 512 codebook，验证残差式 2 级 VQ 能否在
+保持 IC 的同时改善码本利用与训练稳定性。
+
 # HVQ-Stock
 
 层次化向量量化（Hierarchical VQ / Residual VQ）股票预测实验仓库。代码以
@@ -105,3 +116,13 @@ conda run -n prism-vq python -m unittest tests.test_hvq -v
 - `configs/config.yaml`：新增 quantizer `type` / `num_levels` / `level_num_embed`、
   `data.pickle_dir`；`stage2_presets` 的 `saved_model` 置空待训练后填写。
 - 新增 `tests/test_hvq.py`。
+
+## Smoke 状态
+
+PASS — Stage 1（HVQ，1 epoch smoke 及完整训练均跑通）与 Stage 2
+（seed 0）全流程验证通过；详见 `main` 分支
+`experiments/records/001-hvq-residual-2level.md`。
+
+---
+
+原始 PRISM-VQ 项目说明见 `main` 分支的 README。
