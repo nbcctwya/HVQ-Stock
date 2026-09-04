@@ -72,20 +72,22 @@ diff 确认无任何写入。
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0333
+ICIR: 0.1810
+RankIC: 0.0533
+RankICIR: 0.2830
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 11.23%（基准 6.40%，超额 4.83%）
+Sharpe: 0.7651
+Sortino: 1.1160
+MDD: -12.64%
+Calmar: 0.8886
+Turnover: 0.3275
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=5-val_loss=0.4592.ckpt`；Stage 2 seed 0。
+
+产物：`artifacts/003/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
