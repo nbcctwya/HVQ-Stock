@@ -11,11 +11,13 @@
 # Entry format:
 #   - id: "004"                          # three-digit string
 #     name: market-gated-z1              # kebab-case
+#     base: main                         # base branch (default main)
 #     branch: exp/004-market-gated-z1
 #     status: pending
 
 experiments:
   - id: "001"
     name: hvq-residual-2level
+    base: main
     branch: exp/001-hvq-residual-2level
     status: done

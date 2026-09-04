@@ -8,6 +8,10 @@
 #             New id = max(existing ids) + 1. Ids are never reused,
 #             even for failed experiments.
 #   name    : short, readable kebab-case name derived from the idea.
+#   base    : branch the experiment is created from. Default "main".
+#             If the user explicitly asks to build on an existing
+#             experiment, use that experiment's branch, e.g.
+#             "exp/001-hvq-residual-2level". Never infer this.
 #   branch  : always "exp/<id>-<name>", e.g. exp/004-market-gated-z1.
 #   status  : exactly one of:
 #               pending  - code complete, smoke PASS, ready for training
@@ -22,5 +26,6 @@
 experiments:
   - id: "001"
     name: example-entry
+    base: main
     branch: exp/001-example-entry
     status: pending

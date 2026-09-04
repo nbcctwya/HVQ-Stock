@@ -32,10 +32,16 @@
 - 实验记录文件名必须为：`records/<ID>-<name>.md`。
 - ID、名称、分支名、记录文件名、queue 条目必须一一对应。
 
-### 3. 创建实验分支
+### 3. 创建实验分支（base 规则）
 
 - 必须先创建实验分支，再修改任何代码。
-- 每个实验分支默认从 `main` 创建，除非用户明确指定其他 base。
+- 新实验默认从 `main` 创建，此时 `base: main`。
+- 只有当用户明确指定"基于某个已有实验继续开发"时，才从该实验的
+  `branch` 创建，此时 `base` 填该分支名（例如
+  `base: exp/001-hvq-residual-2level`）。
+- 不要自动推断继承关系；用户未明确指定时，始终使用 `main`。
+- 创建分支前必须先确认 `base` 分支真实存在（`git rev-parse --verify`）。
+- queue 条目和 record（`## Git` 的 `Base:`）中的 `base` 必须一致。
 - 一个实验只修改该 Idea 必需的内容，不顺手重构无关代码。
 - 默认保持数据划分、seed、训练协议、回测协议和其他 baseline
   参数不变，除非 Idea 明确要求修改。
@@ -52,9 +58,9 @@
 2. 切回 `main`。
 3. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
-   Modification、Constraints、Git（Branch 填 exp 分支名，
-   Commit 填实验分支上的代码 commit hash）、Smoke Test。
-   Result 保持 `Status: PENDING`，Conclusion 留空。
+   Modification、Constraints、Git（Base 填创建分支所用的 base，
+   Branch 填 exp 分支名，Commit 填实验分支上的代码 commit hash）、
+   Smoke Test。Result 保持 `Status: PENDING`，Conclusion 留空。
 4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
    （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
 5. 在 `main` 上 commit record + queue 的变更。
