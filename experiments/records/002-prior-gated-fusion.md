@@ -21,14 +21,21 @@ per-sample 的 gate，自适应决定当前样本中 prior 信息和 latent 信�
   （`'fixed' | 'gated'`，默认 `'fixed'` 保持原行为）。`'gated'` 模式下
   新增 `self.gate = nn.Linear(num_prior + num_latent, 1)`，以
   `[f_prior, f_latent]` 为输入、经 sigmoid 得到 per-sample 标量门
-  `g`，输出 `alpha + g * prior_term + (1 - g) * latent_term`；
-  零初始化 bias 使初始 gate = 0.5（等权）。`use_prior=False` 路径不变。
+  `g`，输出 `alpha + 2*g*prior_term + 2*(1-g)*latent_term`；
+  gate 显式零初始化（`gate.weight = 0`、`gate.bias = 0`），
+  保证初始化时所有样本 `g = 0.5`，配合 2 倍缩放使初始输出严格等于
+  原始固定融合 `alpha + prior_term + latent_term`。
+  `use_prior=False` 路径不变。
 - `GenerateReturn.__init__` 读取 `config['predictor'].get('fusion',
   'fixed')` 并传入 `ReturnPredictor`。
-- `configs/config.yaml`：`predictor.fusion: 'gated'`。
-- 新增 `tests/test_gated_fusion.py`（8 个 unittest 用例：fixed 模式与
-  原公式一致、gated 初始等权、gate 两端极限分别退化为 prior-only /
-  latent-only、gate 随样本变化、梯度可达 gate 参数、非法 fusion 报错）。
+- `configs/config.yaml`：`predictor.fusion: 'gated'`，默认
+  `train.seed: 0`。
+- 分支根目录 `README.md` 改写为本实验说明（按 RULES 的 README 规则）。
+- 新增 `tests/test_gated_fusion.py`（9 个 unittest 用例：fixed 模式与
+  原公式一致、gate 显式零初始化、新建 gated predictor 初始输出严格等于
+  fixed fusion（无需手动清零）、gate 两端极限分别退化为
+  `alpha + 2*prior_term` / `alpha + 2*latent_term`、gate 随样本变化、
+  梯度可达 gate 参数、非法 fusion 报错）。
 
 ## Constraints
 
@@ -44,20 +51,21 @@ per-sample 的 gate，自适应决定当前样本中 prior 信息和 latent 信�
 
 Base: main
 Branch: exp/002-prior-gated-fusion
-Commit: ac5d1f6
+Commit: 2752a2f（ac5d1f6 初版 gated fusion；2752a2f 修正为 2 倍缩放 +
+gate 显式零初始化，初始输出与原固定融合严格等价）
 
 ## Smoke Test
 
 Status: PASS
-Notes: 单元测试 8/8 通过（`python -m unittest tests.test_gated_fusion`，
+Notes: 单元测试 9/9 通过（`python -m unittest tests.test_gated_fusion`，
 环境 conda `prism-vq`）。Stage 1 smoke：`stage1.py train.num_epochs=1
 train.run_name=gfuse_smoke`，1 epoch 完成，val_loss=0.9228，产出
 `checkpoints/gfuse_smoke-epoch=0-val_loss=0.9228.ckpt`。Stage 2 smoke：
 `stage2.py train.num_epochs=1 train.seed=0
 predictor.saved_model="gfuse_smoke-epoch=0-val_loss=0.9228.ckpt"`，
-训练 + valid/test 推理全流程完成（Test RankIC 0.0427，仅供流程验证），
+训练 + valid/test 推理全流程完成（Test RankIC 0.0448，仅供流程验证），
 产出 checkpoint 中确认含 `return_predictor.gate.weight`（1×141）且
-bias 已从 0 更新，证明 gate 端到端参与训练。日志：
+weight/bias 已从零初始化更新，证明 gate 端到端参与训练。日志：
 `logs/stage1_gfuse_smoke.log`、`logs/stage2_gfuse_smoke.log`。
 注意：Stage 2 smoke 的预测输出覆盖了 `res/VQ512_csi300_mo2_k1_.../
 0_best.pkl`（该路径按配置参数命名，001 的同名产物被 smoke 结果覆盖）。
