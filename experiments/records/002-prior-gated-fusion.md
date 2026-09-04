@@ -81,20 +81,22 @@ artifact_root 的上一轮 smoke 完全一致，仅供流程验证）；全部�
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0317
+ICIR: 0.1697
+RankIC: 0.0508
+RankICIR: 0.2664
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 9.72%（基准 6.40%，超额 3.32%）
+Sharpe: 0.6638
+Sortino: 0.9282
+MDD: -16.32%
+Calmar: 0.5955
+Turnover: 0.3251
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`；Stage 2 seed 0。
+
+产物：`artifacts/002/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
