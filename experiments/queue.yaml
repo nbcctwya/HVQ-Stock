@@ -17,5 +17,5 @@
 experiments:
   - id: "001"
     name: hvq-residual-2level
-    branch: main
+    branch: exp/001-hvq-residual-2level
     status: done
