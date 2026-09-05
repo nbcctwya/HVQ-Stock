@@ -152,38 +152,47 @@
 
 ### 5. 收尾（Final Experiment Commit 流程，严格按顺序执行）
 
-固定顺序：`开发完成 → tests PASS → smoke PASS → 提交 Final Experiment
-Commit → 获取 HEAD SHA → 冻结实验分支 → 切回 main → 用该 SHA 写入
+固定顺序：`开发完成 → tests PASS → smoke PASS → 确认 diff 仅含预期实验
+修改 → 提交 Final Experiment Commit → 确认 tracked 工作区 clean →
+获取 HEAD SHA → 冻结实验分支 → 切回 main → 用该 SHA 写入
 queue 和 record`。
 
 1. 确认开发完成：单元测试 PASS、最小 smoke test PASS。
    失败则回到第 4 步（开发与验证）继续修复；修复前不允许进入下一步，
    更不允许加入 queue。
-2. 确认实验分支工作区 clean（`git status --porcelain` 无未提交改动；
-   artifact、数据 symlink 等未跟踪路径除外）。
+2. 检查未提交改动的范围（**提交前不要求工作区 clean**——此时尚未提交
+   Final Experiment Commit，工作区本来就该有改动）：
+   `git status --porcelain` 与 `git diff` 中必须只包含本实验预期的修改
+   （实验代码、默认 config、分支 README、本实验新增的测试），
+   不得混入任何无关改动；artifact、数据 symlink 等未跟踪路径除外。
+   发现无关改动时先移除或拆分，不得带进 Final Experiment Commit。
 3. 在实验分支上提交 **Final Experiment Commit**（仅代码改动）。
    从这一刻起实验分支**冻结**，不得再有任何提交；实验逻辑如需变化，
    必须创建新的实验 ID。
-4. 获取该 commit 的完整 SHA：`git rev-parse HEAD`。这就是该实验唯一的
+4. 确认提交后 tracked 工作区 clean：
+   `git status --porcelain --untracked-files=no` 无输出——即所有预期
+   修改都已进入 Final Experiment Commit，没有遗漏未提交的内容。
+5. 获取该 commit 的完整 SHA：`git rev-parse HEAD`。这就是该实验唯一的
    正式代码版本。
-5. 切回 `main`。
-6. 在 `main` 上按 `templates/experiment.template.md` 创建
+6. 切回 `main`。
+7. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
    Modification、Constraints、Git（Base 填创建分支所用的 base，
-   Branch 填 exp 分支名，Commit 填第 4 步的完整 SHA）、Smoke Test。
+   Branch 填 exp 分支名，Commit 填第 5 步的完整 SHA）、Smoke Test。
    Result 保持 `Status: PENDING`，Conclusion 留空。
-7. 在 `main` 上向 `experiments/queue.yaml` 追加该实验（按 id 顺序追加到
-   末尾），初始状态必须为 `pending`，`commit` 填第 4 步的同一个完整
+8. 在 `main` 上向 `experiments/queue.yaml` 追加该实验（按 id 顺序追加到
+   末尾），初始状态必须为 `pending`，`commit` 填第 5 步的同一个完整
    SHA。需要复用 Stage 1 时同时填写 `stage1_source`（以及 external
    形式下的 `stage1_ckpt`）。
-8. **入队一致性校验（必须全部通过才算入队完成）**：
+9. **入队一致性校验（必须全部通过才算入队完成）**：
    - tests PASS、smoke PASS（第 1 步已确认）；
-   - exp 分支工作区 clean；
-   - `git rev-parse exp/<ID>-<name>` == 第 4 步的 Final Experiment
+   - exp 分支 tracked 工作区 clean（第 4 步已确认：Final Experiment
+     Commit 之后无遗留未提交改动）；
+   - `git rev-parse exp/<ID>-<name>` == 第 5 步的 Final Experiment
      Commit（分支在冻结后没有被意外移动）；
    - `queue.commit` == record `## Git` 的 `Commit` == 分支冻结 HEAD，
      三者是完全相同的完整 sha。
-9. 在 `main` 上 commit record + queue 的变更。
+10. 在 `main` 上 commit record + queue 的变更。
 
 ### 6. 边界
 
