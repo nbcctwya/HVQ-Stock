@@ -98,12 +98,22 @@ checkpoint `state_dict['z1_scale_raw']` 可正确恢复该值；wandb 记录
 
 ## Result
 
-Status: FAILED
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/004/run/stage2.log
+IC: 0.0351
+ICIR: 0.2163
+RankIC: 0.0506
+RankICIR: 0.3166
+
+Annual Return: 12.15%（基准 6.40%，超额 5.75%）
+Sharpe: 0.6778
+Sortino: 1.0312
+MDD: -19.33%
+Calmar: 0.6286
+Turnover: 0.3297
 
 ## Conclusion
 
-Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/004/run/stage2.log
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit f8b782c9e95c05b27a15e8c433e48efb12df5c59）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
 
-全部 artifact 与日志保留在 `artifacts/004/run/`。
+产物：`artifacts/004/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
