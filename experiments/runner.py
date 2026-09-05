@@ -10,7 +10,19 @@ Fixed pipeline per experiment (see experiments/templates/RULES.md):
 All formal artifacts live under ``artifacts/<ID>/run/`` via the
 ``artifact_root`` execution-layer override. The runner is deterministic and
 resumable: a stage is re-executed only when its completion marker or its
-expected artifacts are missing.
+expected artifacts are missing. Stage 1 resume reads the exact checkpoint
+recorded in ``.stage1.done`` instead of rescanning the shared checkpoint
+directory.
+
+By default the runner consumes ``pending`` and ``running`` entries (a
+``running`` entry means a previous execution was interrupted; it resumes
+from the existing markers/artifacts). ``done`` is always skipped; ``failed``
+is retried only via an explicit ``--only``.
+
+A queue entry may set ``stage1_source: "<id>"`` to reuse that experiment's
+formal stage1 best checkpoint instead of training its own (stage2-only
+experiments). The default ``self`` trains stage1 normally. The source is
+declared by the experiment author in Phase 1; the runner never infers it.
 
 The runner only invokes the existing entry points (stage1.py, stage2.py,
 backtest_qlib.py) and never touches experiment logic, hyperparameters, data
@@ -114,19 +126,61 @@ def run_dir_for(repo: Path, exp_id: str) -> Path:
     return repo / "artifacts" / exp_id / "run"
 
 
-def find_best_stage1_ckpt(run_dir: Path):
-    """Return (val_loss, path) of the best stage1 checkpoint, or None."""
+def find_best_stage1_ckpt(run_dir: Path, since: float = None):
+    """Return (val_loss, path) of the best stage1 checkpoint, or None.
+
+    ``since`` restricts the scan to checkpoints modified at/after that
+    timestamp; a fresh scan right after a stage1 run then cannot pick up
+    stale stage2 checkpoints sharing the same directory.
+    """
     ckpt_dir = run_dir / "checkpoints"
     if not ckpt_dir.is_dir():
         return None
     cands = []
     for p in ckpt_dir.glob("*.ckpt"):
         m = BEST_CKPT_RE.search(p.name)
-        if m and p.stat().st_size > 0:
-            cands.append((float(m.group(2)), p))
+        if not m:
+            continue
+        st = p.stat()
+        if st.st_size == 0:
+            continue
+        if since is not None and st.st_mtime < since:
+            continue
+        cands.append((float(m.group(2)), p))
     if not cands:
         return None
     return min(cands, key=lambda t: t[0])
+
+
+def read_stage1_marker(marker_path: Path) -> dict:
+    info = {}
+    for line in marker_path.read_text().splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info[key.strip()] = value.strip()
+    return info
+
+
+def resolve_marker_ckpt(repo: Path, run_dir: Path, info: dict):
+    """Resolve the checkpoint recorded in a .stage1.done marker and validate it.
+
+    A bare filename resolves against ``run_dir/checkpoints`` (self-trained);
+    an absolute path is used as-is (reused from another experiment's
+    artifacts). Either way the file must exist, be non-empty, and live under
+    ``repo/artifacts``.
+    """
+    best = info.get("best")
+    if not best:
+        return None
+    p = Path(best)
+    if not p.is_absolute():
+        p = run_dir / "checkpoints" / p.name
+    p = p.resolve()
+    if not p.is_relative_to((repo / "artifacts").resolve()):
+        return None
+    if not p.is_file() or p.stat().st_size == 0:
+        return None
+    return p
 
 
 def find_stage2_outputs(run_dir: Path):
@@ -224,24 +278,72 @@ def update_record(repo: Path, exp: dict, result_text: str, conclusion: str) -> N
     path.write_text(new_text)
 
 
-def stage1(repo: Path, run_dir: Path) -> Path:
+def reuse_stage1_ckpt(repo: Path, source_id: str, exp_id: str) -> Path:
+    """Load the exact stage1 best checkpoint of a finished source experiment.
+
+    Fails loudly when the source artifacts are missing or corrupt; the runner
+    must never silently retrain stage1 for a stage2-only experiment.
+    """
+    if source_id == str(exp_id):
+        raise StageError(
+            f"stage1_source={source_id} must differ from the experiment's own id"
+        )
+    src_run = run_dir_for(repo, source_id)
+    src_marker = src_run / ".stage1.done"
+    if not src_marker.is_file():
+        raise StageError(
+            f"stage1_source={source_id}: source stage1 marker not found "
+            f"({src_marker}); refusing to retrain stage1 for this experiment"
+        )
+    info = read_stage1_marker(src_marker)
+    ckpt = resolve_marker_ckpt(repo, src_run, info)
+    if ckpt is None:
+        raise StageError(
+            f"stage1_source={source_id}: source checkpoint missing or invalid "
+            f"(marker best={info.get('best')!r}); refusing to retrain stage1"
+        )
+    return ckpt
+
+
+def stage1(repo: Path, run_dir: Path, exp: dict):
+    """Return (ckpt_path, provenance) for the experiment's stage1 checkpoint."""
     marker = run_dir / ".stage1.done"
-    best = find_best_stage1_ckpt(run_dir)
-    if marker.exists() and best is not None:
-        log(f"stage1 already complete (best={best[1].name}, val_loss={best[0]:.4f}), skipping")
-        return best[1]
+    source = str(exp.get("stage1_source") or "self")
+
+    # Resume path: trust the exact checkpoint recorded in the marker instead
+    # of rescanning the shared checkpoint directory.
+    if marker.exists():
+        info = read_stage1_marker(marker)
+        ckpt = resolve_marker_ckpt(repo, run_dir, info)
+        if ckpt is not None:
+            mode = "reused" if info.get("reused") == "true" else "self"
+            log(f"stage1 already complete (best={ckpt.name}, mode={mode}), skipping")
+            return ckpt, {"mode": mode, "source_id": info.get("source"), "ckpt": str(ckpt)}
+        log("stage1 marker points to a missing/invalid checkpoint, re-resolving stage1")
+
+    if source != "self":
+        ckpt = reuse_stage1_ckpt(repo, source, exp["id"])
+        marker.write_text(f"best={ckpt}\nsource={source}\nreused=true\n")
+        log(f"stage1 reused from experiment {source}: {ckpt}")
+        return ckpt, {"mode": "reused", "source_id": source, "ckpt": str(ckpt)}
+
+    # Self-trained stage1. Actually re-running stage1 invalidates downstream
+    # stage2/backtest markers, since their inputs change.
     marker.unlink(missing_ok=True)
+    for downstream in (".stage2.done", ".backtest.done"):
+        (run_dir / downstream).unlink(missing_ok=True)
     artifact_root = run_dir.relative_to(repo)
+    start = time.time()
     run_with_retries(
         [sys.executable, "stage1.py", f"artifact_root={artifact_root}"],
         run_dir / "stage1.log", repo, STAGE1_MAX_ATTEMPTS,
     )
-    best = find_best_stage1_ckpt(run_dir)
+    best = find_best_stage1_ckpt(run_dir, since=start)
     if best is None:
         raise StageError("stage1 finished but no best checkpoint found")
     marker.write_text(f"best={best[1].name}\nval_loss={best[0]}\n")
     log(f"stage1 done: best={best[1].name} val_loss={best[0]:.4f}")
-    return best[1]
+    return best[1], {"mode": "self", "source_id": None, "ckpt": str(best[1])}
 
 
 def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
@@ -251,20 +353,26 @@ def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
         log(f"stage2 already complete (res={res_subdir.name}), skipping")
         return res_subdir
     marker.unlink(missing_ok=True)
+    (run_dir / ".backtest.done").unlink(missing_ok=True)
     artifact_root = run_dir.relative_to(repo)
+    # A checkpoint reused from another experiment lives outside this
+    # experiment's checkpoint dir; pass it as an absolute path (stage2
+    # resolves only relative saved_model values against the checkpoint dir).
+    own_ckpt = ckpt.parent.resolve() == (run_dir / "checkpoints").resolve()
+    saved_model = ckpt.name if own_ckpt else str(ckpt)
     run_with_retries(
         [
             sys.executable, "stage2.py",
             f"train.seed={STAGE2_SEED}",
             f"artifact_root={artifact_root}",
-            f'predictor.saved_model="{ckpt.name}"',
+            f'predictor.saved_model="{saved_model}"',
         ],
         run_dir / "stage2.log", repo, STAGE2_MAX_ATTEMPTS,
     )
     res_subdir = find_stage2_outputs(run_dir)
     if res_subdir is None:
         raise StageError("stage2 finished but prediction/metric artifacts not found")
-    marker.write_text(f"res={res_subdir.name}\nckpt={ckpt.name}\n")
+    marker.write_text(f"res={res_subdir.name}\nckpt={saved_model}\n")
     log(f"stage2 done: res={res_subdir.name}")
     return res_subdir
 
@@ -319,7 +427,7 @@ def build_result_text(metrics: dict, port: dict, bench: dict) -> str:
     return "\n".join(lines)
 
 
-def run_experiment(repo: Path, exp: dict) -> bool:
+def run_experiment(repo: Path, exp: dict, valid_ids) -> bool:
     exp_id, name, branch = exp["id"], exp["name"], exp["branch"]
     log(f"===== experiment {exp_id} ({name}) on {branch} =====")
     run_dir = run_dir_for(repo, exp_id)
@@ -328,9 +436,12 @@ def run_experiment(repo: Path, exp: dict) -> bool:
     set_queue_status(repo, exp_id, "running")
     commit_main(repo, f"Phase 2: start {exp_id}-{name} (running)")
     try:
+        source = str(exp.get("stage1_source") or "self")
+        if source != "self" and source not in valid_ids:
+            raise StageError(f"stage1_source={source}: no such experiment in the queue")
         checkout(repo, branch)
         universe = read_branch_universe(repo)
-        ckpt = stage1(repo, run_dir)
+        ckpt, stage1_prov = stage1(repo, run_dir, exp)
         res_subdir = stage2(repo, run_dir, ckpt)
         metric_path = backtest(repo, run_dir, res_subdir, universe)
 
@@ -339,6 +450,7 @@ def run_experiment(repo: Path, exp: dict) -> bool:
         summary = {
             "id": exp_id, "name": name, "branch": branch,
             "stage1_best_ckpt": ckpt.name,
+            "stage1_source": stage1_prov,
             "res_dir": res_subdir.name,
             "stage2_metrics": metrics,
             "portfolio": port,
@@ -346,9 +458,16 @@ def run_experiment(repo: Path, exp: dict) -> bool:
         }
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
         result_text = build_result_text(metrics, port, bench)
+        if stage1_prov["mode"] == "reused":
+            stage1_line = (
+                f"Stage 1 复用实验 {stage1_prov['source_id']} 的正式 checkpoint："
+                f"`{stage1_prov['ckpt']}`（本实验未重新训练 Stage 1）"
+            )
+        else:
+            stage1_line = f"Stage 1 best checkpoint：`{ckpt.name}`（self-trained）"
         conclusion = (
             f"Phase 2 固定执行器完成正式训练、预测与回测。"
-            f"Stage 1 best checkpoint：`{ckpt.name}`；"
+            f"{stage1_line}；"
             f"Stage 2 seed {STAGE2_SEED}。\n\n"
             f"产物：`artifacts/{exp_id}/run/`（checkpoints/、res/、"
             f"stage1.log、stage2.log、backtest.log、summary.json）。"
@@ -372,6 +491,22 @@ def run_experiment(repo: Path, exp: dict) -> bool:
     return ok
 
 
+def select_experiments(experiments, only=None):
+    """Pick which queue entries to run.
+
+    Default: pending + running (a running entry means a previous execution
+    was interrupted; resume from its artifact markers). done is always
+    skipped; failed is retried only via an explicit --only selection.
+    """
+    if only is not None:
+        wanted = set(only)
+        return [
+            e for e in experiments
+            if e["id"] in wanted and e["status"] in ("pending", "running", "failed")
+        ]
+    return [e for e in experiments if e["status"] in ("pending", "running")]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="Path to the HVQ-Stock repo root.")
@@ -383,22 +518,17 @@ def main() -> int:
     queue = load_queue(repo)
     experiments = sorted(queue["experiments"], key=lambda e: e["id"])
 
-    selected = []
-    for exp in experiments:
-        if args.only is not None:
-            if exp["id"] in args.only and exp["status"] in ("pending", "failed", "running"):
-                selected.append(exp)
-        elif exp["status"] == "pending":
-            selected.append(exp)
+    selected = select_experiments(experiments, args.only)
 
     if not selected:
         log("no experiments to run")
         return 0
 
     log(f"experiments to run: {[e['id'] for e in selected]}")
+    valid_ids = {e["id"] for e in experiments}
     results = {}
     for exp in selected:
-        results[exp["id"]] = run_experiment(repo, exp)
+        results[exp["id"]] = run_experiment(repo, exp, valid_ids)
 
     log(f"all done: {results}")
     return 0 if all(results.values()) else 1

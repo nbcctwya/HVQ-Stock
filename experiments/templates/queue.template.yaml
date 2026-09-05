@@ -18,6 +18,12 @@
 #               running  - being executed by the stage-2 executor
 #               done     - finished, metrics written to the record
 #               failed   - execution failed; id and record are kept
+#   stage1_source (optional, default "self"):
+#             "self" trains stage1 normally. An existing experiment id
+#             (e.g. "001") reuses that experiment's formal stage1 best
+#             checkpoint (stage2-only experiments). Declared explicitly
+#             by the experiment author after verifying checkpoint
+#             compatibility; never inferred by the executor.
 #
 # Ordering: entries are sorted by id ascending.
 # Mutation: append-only for new experiments; only `status` may be

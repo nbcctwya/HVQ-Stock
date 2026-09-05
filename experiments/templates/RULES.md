@@ -101,6 +101,22 @@
    （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
 5. 在 `main` 上 commit record + queue 的变更。
 
+### 3.2 Stage 1 复用（stage1_source）
+
+- queue 条目支持可选字段 `stage1_source`，缺省视为 `self`
+  （本实验自己训练 Stage 1），保持向后兼容。
+- 只修改 Stage 2 的实验（例如只改预测头或融合方式、Stage 1 完全不变），
+  可以显式指定 `stage1_source: "<已有实验ID>"`，复用该实验已完成的正式
+  Stage 1 best checkpoint，保证 controlled experiment 并节省 GPU 时间。
+- 是否允许复用由创建实验的 AI 在第一阶段明确判断并写进 queue；
+  执行器不得自动推断或猜测 Stage 1 source。
+- 指定复用前必须确认 source 实验的 Stage 1 模型结构、量化器配置与数据
+  划分和本实验完全一致（checkpoint 可以 strict 加载到本实验的 Stage 1
+  模型）。
+- 执行器复用时从 `artifacts/<source_id>/run/.stage1.done` 读取精确的
+  Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并把实验标记为
+  failed，不允许偷偷改为重新训练 Stage 1。
+
 ### 6. 边界
 
 - queue 中的 `pending` 实验代表：代码已经开发完成、smoke 已通过、
@@ -111,8 +127,12 @@
 
 ## 第二阶段（执行器）的职责边界
 
-- 执行器只消费 queue 中 `pending` 的实验，按 ID 顺序执行；
-  执行时切到对应的 exp 分支，完成后回到 `main` 更新元数据。
+- 执行器默认消费 queue 中 `pending` 和 `running` 的实验，按 ID 顺序执行；
+  `running` 表示上一次执行可能中断，重新进入时依靠 artifact 中的
+  `.stage1.done` / `.stage2.done` / `.backtest.done` marker 自动续跑，
+  不得因此清空 artifact 或从头执行。`done` 永远跳过；`failed` 只有在
+  显式指定（`--only <ID>`）时才允许重试。
+- 执行时切到对应的 exp 分支，完成后回到 `main` 更新元数据。
 - 执行器负责在 `main` 上补充记录中的 Result 部分，并将 queue
   状态更新为 `done` 或 `failed`；必要时填写 Conclusion。
 - 执行器不创建新实验、不修改实验代码、不改动 ID 与命名。
