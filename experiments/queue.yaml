@@ -44,8 +44,9 @@ experiments:
     stage1_source: external
     # Corrected-baseline exact Stage 1 (PRISM-VQ original single-VQ512,
     # seed 42); the controlled fixed-vs-gated comparison shares this
-    # checkpoint with the baseline.
-    stage1_ckpt: ../PRISM-VQ/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
+    # checkpoint with the baseline. Self-contained copy inside this repo
+    # (byte-identical to the PRISM-VQ original, md5 6b9d9dbf).
+    stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
   - id: "003"
     name: hvq-z0-only
     base: exp/001-hvq-residual-2level
