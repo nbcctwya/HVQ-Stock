@@ -88,6 +88,8 @@ ranking 指标略低（IC 0.0352 vs 0.0373，RankIC 0.0506 vs 0.0552），
 但组合层面明显更优（AR 13.69% vs 9.24%，Sharpe 0.7591 vs 0.5223，
 MDD -18.49% vs -26.90%）。两级 HVQ 在 corrected protocol 下整体优于单层
 baseline 的组合表现，ranking 指标上基本持平略弱。
-注意：001 的 Stage 1 为本仓库自训（val_loss 0.4592），baseline 的 Stage 1 为
-PRISM-VQ 原始 checkpoint（epoch=7, val_loss 0.5712），两者是同一架构的
-不同训练实例，比较时存在该实例差异。
+注意：001 的 Stage 1 是 Residual HVQ 256+256（本仓库自训，val_loss 0.4592），
+baseline 的 Stage 1 是 single VQ512（PRISM-VQ 原始 checkpoint epoch=7，
+val_loss 0.5712）——Stage 1 架构不同属于本实验的实验设计本身，并非
+"同架构不同训练实例"的混淆；但两者的 Stage 1 为各自独立训练的
+checkpoint，跨架构比较的数值同时包含实现与训练实例差异。

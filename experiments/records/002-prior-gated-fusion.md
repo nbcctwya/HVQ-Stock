@@ -83,42 +83,58 @@ artifact_root 的上一轮 smoke 完全一致，仅供流程验证）；全部�
 
 Status: DONE — Corrected Protocol seed0（test 区间 2023-01-01 – 2025-12-31）
 
-协议：corrected Stage 2 freeze（encoder/quantizer/RevIN 全程 eval）+ corrected MDD（初始 NAV=1 计入 peak）；Stage 2 seed 0；回测 Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，close 成交，CN limit=None。
+协议：corrected Stage 2 freeze + corrected MDD；Stage 2 seed 0；回测
+Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，close 成交，
+CN limit=None。
 
-IC: 0.0317
-ICIR: 0.1697
-RankIC: 0.0508
-RankICIR: 0.2664
+### Controlled result（正式比较依据，与 corrected baseline 共享 exact Stage 1）
 
-Annual Return: 9.72%（基准 6.40%，超额 3.32%，AR 差值口径）
-Sharpe: 0.6638
-Sortino: 0.9282
-MDD: -16.32%
-Calmar: 0.5955
-Turnover: 0.3251
-
-Stage 1 checkpoint provenance：self-trained（seed 42，Phase 2 正式训练）：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`（`artifacts/002/run/checkpoints/`，未重训）。
+Stage 1 checkpoint provenance：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt`
+（PRISM-VQ 原始 single-VQ512 Stage 1，与 corrected baseline 完全相同；
+strict 加载验证 missing=0 / unexpected=0）。
+唯一核心变量：Stage 2 融合方式 fixed fusion（baseline）vs gated fusion（002）。
 Stage 2 seed：0
-产物：`artifacts/002/run/`（checkpoints/、res/、backtest、summary.json、stage1/stage2/backtest 日志）。
+产物：`artifacts/002/run/`（res/、backtest、summary.json、stage2.log、backtest.log）。
 
-代码版本：实验代码 1d16627 + 公共 correctness fix 726836e（新增 `train()` 覆写强制冻结模块 eval；不改变实验 Idea、结构、超参、数据或协议）。
+IC: 0.0370
+ICIR: 0.2172
+RankIC: 0.0552
+RankICIR: 0.3309
 
-### Historical（不再作为正式比较依据）
+Annual Return: 8.03%（基准 6.40%，超额 1.63%，AR 差值口径）
+Sharpe: 0.4577
+Sortino: 0.6687
+MDD: -26.52%
+Calmar: 0.3028
+Turnover: 0.3289
 
-pre-fix seed0（无 freeze override + 旧 MDD 实现，旧产物备份于 `artifacts/002/run/pre_fix/`）：IC 0.0317 / ICIR 0.1697 / RankIC 0.0508 / RankICIR 0.2664 / AR 9.72% / Sharpe 0.6638 / MDD -16.32% / Calmar 0.5955 / Turnover 0.3251。
+### Previous corrected result（存在 Stage 1 实例混淆，不再作为比较依据）
 
-### Corrected 与 Historical 的关系
+使用 002 自训练 Stage 1 `infucsi300...epoch=10-val_loss=0.5933.ckpt`
+（与 baseline 不同训练实例）：
+IC 0.0317 / ICIR 0.1697 / RankIC 0.0508 / RankICIR 0.2664 /
+AR 9.72% / Sharpe 0.6638 / Sortino 0.9282 / MDD -16.32% /
+Calmar 0.5955 / Turnover 0.3251。
+产物备份：`artifacts/002/run/uncontrolled_stage1/`。
 
-corrected 重跑与 historical 逐位一致，原因同 001（PL 2.6.4 逐子模块 restore mode + 净值曾超过初始 NAV）。corrected 协议确认了旧数值有效。
+### Historical（pre-fix，不再作为比较依据）
+
+旧 Stage 2 freeze 行为 + 旧 MDD 实现时期的 seed0 结果与 previous corrected
+逐位一致（freeze bug 在 PL 2.6.4 下未实际触发）。产物备份：
+`artifacts/002/run/pre_fix/`。
+
+代码版本：实验代码 1d16627 + 公共 correctness fix 726836e（`train()` 覆写
+强制冻结模块 eval；不改变实验 Idea、结构、超参、数据或协议）。
 
 ## Conclusion
 
-Corrected Protocol 下，gated fusion（002）相对 corrected baseline（fixed fusion）：
-ranking 指标略低（IC 0.0317 vs 0.0373，RankIC 0.0508 vs 0.0552），
-组合层面互有胜负（AR 9.72% vs 9.24% 略高，Sharpe 0.6638 vs 0.5223 更高，
-MDD -16.32% vs -26.90% 明显更好，Turnover 相近）。
-结论：gated fusion 在 corrected protocol 下并非"明显弱于" fixed fusion——
-排序能力略降，但风险调整收益与回撤更好。
-注意：002 的 Stage 1 为本仓库自训实例（val_loss 0.5933），与 baseline 所用
-PRISM-VQ 原始 checkpoint（epoch=7, val_loss 0.5712）不是同一训练实例，
-该差异是本比较的已知混淆因素。
+在与 baseline 共享 exact Stage 1 checkpoint 的严格受控对照下（唯一变量为
+Stage 2 融合方式），gated fusion 与 fixed fusion 的排序能力几乎相同
+（IC 0.0370 vs 0.0373，RankIC 0.0552 vs 0.0552，RankICIR 0.3309 vs 0.3313），
+组合层面略弱（AR 8.03% vs 9.24%，Sharpe 0.4577 vs 0.5223，
+MDD -26.52% vs -26.90%，Turnover 0.3289 vs 0.3295）。
+
+结论：per-sample 可学习 gate 没有带来实质收益——gate 从零初始化
+（g=0.5 等价 fixed fusion）出发，训练后几乎没有学到优于固定相加的
+融合方式。此前基于不同 Stage 1 实例观察到的"002 的 Sharpe/MDD 优于
+baseline"由 Stage 1 实例差异造成，在受控条件下消失。
