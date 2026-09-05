@@ -117,27 +117,22 @@ score == score_main + delta、metric 含主路径与 Δŷ 诊断指标——全�
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0321
+ICIR: 0.1720
+RankIC: 0.0517
+RankICIR: 0.2680
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
-
-Phase 2 判读要点：`score` = 最终 ŷ，`score_main` = z0 主路径 ŷ0，
-`delta` = Δŷ；指标含 `IC_main` / `RankIC_main`、`Delta_*`、
-`Corr_delta_resid` / `RankCorr_delta_resid`。需要回答：residual branch
-是否真正改善相对于 003 的 IC / RankIC；最终 ŷ 是否优于单独 ŷ0；Δŷ 的
-方差/幅度是否非零且稳定；Δŷ 与真实 residual `y - ŷ0` 是否存在有效相关；
-z1 是否因此获得可观测的增量预测价值。
+Annual Return: 14.04%（基准 6.40%，超额 7.64%）
+Sharpe: 0.9454
+Sortino: 1.3863
+MDD: -11.64%
+Calmar: 1.2059
+Turnover: 0.3283
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit b2af82df73f63d9387681876017d5fd9e7e678f7）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
+
+产物：`artifacts/006/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
