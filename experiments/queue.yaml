@@ -65,3 +65,10 @@ experiments:
     commit: f8b782c9e95c05b27a15e8c433e48efb12df5c59
     status: pending
     stage1_source: "001"
+  - id: "005"
+    name: hvq-samplewise-z1-gate
+    base: exp/004-hvq-learnable-z1-scale
+    branch: exp/005-hvq-samplewise-z1-gate
+    commit: a232f93d479fa746a0239252edcdcdfd70df7d8a
+    status: pending
+    stage1_source: "001"
