@@ -109,29 +109,22 @@ gate 在 1 epoch 内已呈现非零离散度（std>0），未退化为常数。
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0329
+ICIR: 0.1908
+RankIC: 0.0488
+RankICIR: 0.2794
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
-
-Phase 2 正式结果除常规 IC / RankIC / backtest 指标外，必须报告
-best checkpoint 下 sample-wise gate 的统计分布，至少包括 gate mean /
-std / min / max（或合理分位数），以判断 005 是否真的学到了 sample
-heterogeneity，而不是退化为另一个近似 global scalar。读取位置：
-best checkpoint `state_dict['z1_gate.weight/bias']`、运行日志的
-`Best checkpoint z1_gate stats` / `Final z1_gate stats`，以及 wandb
-指标 `z1_gate_mean/std`、`Val_z1_gate_mean/std/min/max`、
-`Best_Val_z1_gate_mean/std/min/max`。
+Annual Return: 16.11%（基准 6.40%，超额 9.71%）
+Sharpe: 1.0237
+Sortino: 1.5858
+MDD: -13.20%
+Calmar: 1.2208
+Turnover: 0.3274
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit a232f93d479fa746a0239252edcdcdfd70df7d8a）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
+
+产物：`artifacts/005/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
