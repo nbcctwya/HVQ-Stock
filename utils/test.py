@@ -69,12 +69,18 @@ def run_inference(model, data_loader, config, device=None):
     preds = []
     reals = []
 
+    # 006：模型启用 z1_residual_branch 时，同时收集 z0 主路径 ŷ0 与
+    # residual correction Δŷ，用于分别诊断增量预测价值。
+    collect_residual = bool(getattr(model, 'z1_residual_branch', False))
+    preds_main = []
+    deltas = []
+
     # Per-batch IC (mirrors validation_step).
     batch_ics = []
     batch_rics = []
     test_index = data_loader.dataset.get_index()
     test_index_sorted = test_index.sortlevel(0)[0]
-    
+
     for batch_idx, batch in enumerate(tqdm(data_loader, desc="Running Inference")):
         batch = batch.squeeze(0)
         batch = batch.float()
@@ -85,8 +91,13 @@ def run_inference(model, data_loader, config, device=None):
         future_returns = batch[:, -1, n_features+n_prior_factors: ] # (300, 10)
         label = future_returns[:, target_index] # (300, 1)
 
+        if collect_residual:
+            out = model(feature, prior_factor, return_components=True)
+            y_pred = out['y_pred']
+            preds_main.append(out['y0'].cpu().detach().numpy())
+            deltas.append(out['delta_y'].cpu().detach().numpy())
         # wo_prior ablation drops prior_factor.
-        if hasattr(model, 'num_prior_factors') and hasattr(model, 'return_predictor') and not model.return_predictor.use_prior:
+        elif hasattr(model, 'num_prior_factors') and hasattr(model, 'return_predictor') and not model.return_predictor.use_prior:
             y_pred, aux_loss = model(feature)
         else:
             y_pred, beta_p, beta_l, z_q, _ = model(feature, prior_factor)
@@ -108,9 +119,32 @@ def run_inference(model, data_loader, config, device=None):
     reals_s = pd.Series(np.concatenate(reals, axis=0).squeeze(), index=test_index_sorted)
     df = pd.DataFrame({'score': preds_s, 'label': reals_s})
 
+    if collect_residual:
+        # score_main: z0 主路径 ŷ0；delta: residual branch Δŷ；score = ŷ0 + Δŷ
+        df['score_main'] = pd.Series(np.concatenate(preds_main, axis=0).squeeze(), index=test_index_sorted)
+        df['delta'] = pd.Series(np.concatenate(deltas, axis=0).squeeze(), index=test_index_sorted)
+
     rankic = RankIC(df.dropna(), column1='label', column2='score')
     print(f"Per-date RankIC\n{rankic}")
     icir = Cal_IC_IR(df, column1='label', column2='score')
     print(f"Per-date metrics\n{icir}")
+
+    if collect_residual:
+        # z0 主路径 ŷ0 的正式 IC / RankIC，以及 Δŷ 的基本统计与
+        # Δŷ 对真实残差 (y - ŷ0) 的相关性诊断
+        main_icir = Cal_IC_IR(df, column1='label', column2='score_main')
+        icir['IC_main'] = main_icir['IC']
+        icir['ICIR_main'] = main_icir['ICIR']
+        icir['RankIC_main'] = main_icir['RankIC']
+        icir['RankICIR_main'] = main_icir['RankICIR']
+        icir['Delta_mean'] = float(df['delta'].mean())
+        icir['Delta_std'] = float(df['delta'].std())
+        icir['Delta_abs_mean'] = float(df['delta'].abs().mean())
+        true_resid = df['label'] - df['score_main']
+        icir['Corr_delta_resid'] = float(df['delta'].corr(true_resid))
+        icir['RankCorr_delta_resid'] = float(df['delta'].corr(true_resid, method='spearman'))
+        print(f"Main-path (y0) metrics\n{main_icir}")
+        print(f"Delta stats: mean={icir['Delta_mean']:.6f}, std={icir['Delta_std']:.6f}, "
+              f"corr(delta, y-y0)={icir['Corr_delta_resid']:.4f}")
 
     return df, rankic, icir

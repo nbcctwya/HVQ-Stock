@@ -105,6 +105,12 @@ predictor:
   # 003 实验核心开关：Stage 2 只使用 Residual HVQ 第一级量化输出 z0（而非 z0+z1）。
   # 默认 True 即本实验本身；设为 False 回退到 001 的 z0+z1 行为。
   z0_only: true
+  # 006 实验核心开关：在 003 的 z0-only 主预测路径（ŷ0 = F(z0)）之外，增加由 z1
+  # 驱动的 prediction-residual correction branch：Δŷ = G(z1) 学习目标残差
+  # r = y - stopgrad(ŷ0)，最终预测 ŷ = ŷ0 + Δŷ。
+  # 默认 True 即本实验（006）本身，无需实验特有 CLI override；
+  # 设为 False 回退到 003 的纯 z0-only 行为。要求 z0_only=true。
+  z1_residual_branch: true
   
 train:
   seed: 0 # 

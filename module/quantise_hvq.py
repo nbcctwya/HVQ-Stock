@@ -84,6 +84,23 @@ class ResidualVectorQuantiser(nn.Module):
         z_q0, loss_0, (perplexity_0, min_encodings_0, indices_0) = self.levels[0](h_batch)
         return z_q0, loss_0, ([perplexity_0], [min_encodings_0], [indices_0])
 
+    def forward_two_levels(self, h_batch):
+        """分别返回两级量化输出 (z_q0, z_q1)，供 prediction-residual 消融使用。
+
+        z_q0 为第 0 级量化输出（与 forward_level0 一致）；z_q1 为第 1 级对残差
+        h - z_q0 的量化输出。逐级 STE 语义与 forward 完全相同，且
+        forward(h_batch) 的 z_q 数值上等于 z_q0 + z_q1。
+        不改变 forward 的默认 z0 + z1 行为；仅用于 num_levels == 2。
+        """
+        assert self.num_levels == 2, "forward_two_levels 仅支持 num_levels == 2"
+        z_q0, loss_0, (perplexity_0, min_encodings_0, indices_0) = self.levels[0](h_batch)
+        residual = h_batch - z_q0.detach()
+        z_q1, loss_1, (perplexity_1, min_encodings_1, indices_1) = self.levels[1](residual)
+        return (z_q0, z_q1, loss_0 + loss_1,
+                ([perplexity_0, perplexity_1],
+                 [min_encodings_0, min_encodings_1],
+                 [indices_0, indices_1]))
+
 
 def create_quantizer(vqvae_cfg):
     """

@@ -94,6 +94,28 @@ class GenerateReturn(pl.LightningModule):
                 "predictor.z0_only=True 需要 hvq 量化器 (ResidualVectorQuantiser)，"
                 "当前 quantizer.type 不是 'hvq'"
             )
+
+        # 006 消融开关：在 003 的 z0-only 主预测路径（ŷ0 = F(z0)）之外，增加一个
+        # 由 z1 驱动的 prediction-residual correction branch：
+        #   Δŷ = G(z1) 专门学习残差目标 r = y - stopgrad(ŷ0)，最终 ŷ = ŷ0 + Δŷ。
+        # z0 与 z1 在 Stage 2 中职责分离，绝不做 representation-level 的 z0+z1 融合。
+        # 默认 False 保持 003 的纯 z0-only 行为。
+        self.z1_residual_branch = config['predictor'].get('z1_residual_branch', False)
+        if self.z1_residual_branch:
+            if not isinstance(self.quantizer, ResidualVectorQuantiser):
+                raise ValueError(
+                    "predictor.z1_residual_branch=True 需要 hvq 量化器 "
+                    "(ResidualVectorQuantiser)，当前 quantizer.type 不是 'hvq'"
+                )
+            if not self.z0_only:
+                raise ValueError(
+                    "predictor.z1_residual_branch=True 要求 predictor.z0_only=True："
+                    "006 的 z0 主预测路径必须与 003 完全一致"
+                )
+            # 最小 residual prediction head：单层线性 z1(d) -> Δŷ(1)，
+            # 不引入 MLP / attention / gate / market feature，只检验 z1 能否预测
+            # z0 主路径尚未解释的 prediction residual。
+            self.residual_head = nn.Linear(self.vq_embed_dim, 1)
         
         # 3. RevIN
         self.revin = RevIN(self.num_features)
@@ -139,6 +161,9 @@ class GenerateReturn(pl.LightningModule):
 
         self.ic = []
         self.ric = []
+        # 006：z0 主路径 ŷ0 的验证 IC / RankIC（仅 z1_residual_branch 启用时使用）
+        self.ic_main = []
+        self.ric_main = []
         self.best_val_loss = float('inf')
         self.best_metrics_at_min_loss = {}
         self.rank = config['predictor']['rank']
@@ -174,17 +199,24 @@ class GenerateReturn(pl.LightningModule):
 
         return feature, prior_factor, label
     
-    def forward(self, feature, prior_factor):
-        
+    def forward(self, feature, prior_factor, return_components=False):
+
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
-        if self.z0_only:
+        z_q1 = None
+        if self.z1_residual_branch:
+            # 006：分别取两级量化输出。z0 走与 003 完全相同的主预测路径；
+            # z1 只进入 residual correction branch，绝不与 z0 做 z0+z1 融合。
+            z_q, z_q1, _, (_, min_encodings, vq_idx) = self.quantizer.forward_two_levels(h_batch)
+        elif self.z0_only:
             # z0-only 消融：只取 Residual HVQ 第一级量化输出 z0（而非 z0+z1）
             z_q, _, (_, min_encodings, vq_idx) = self.quantizer.forward_level0(h_batch)
         else:
             z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
         z_q = z_q.detach()
+        if z_q1 is not None:
+            z_q1 = z_q1.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
         alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
@@ -200,11 +232,52 @@ class GenerateReturn(pl.LightningModule):
             f_latent = f_latent,            # (B,K)
         )
         loss_imp = softcap_log1p(loss_imp, self.aux_imp)
+
+        if self.z1_residual_branch:
+            # y_pred 到这里为止就是 ŷ0 = F(z0)（与 003 的主路径输出完全一致）。
+            y0 = y_pred
+            delta_y = self.residual_head(z_q1).squeeze(-1)  # (B,)
+            y_pred = y0 + delta_y                           # ŷ = ŷ0 + Δŷ
+            if return_components:
+                return {
+                    'y_pred': y_pred, 'y0': y0, 'delta_y': delta_y,
+                    'beta_p': beta_p, 'beta_l': beta_l,
+                    'z_q': z_q, 'z_q1': z_q1, 'loss_imp': loss_imp,
+                }
         return y_pred, beta_p, beta_l, z_q, loss_imp
+
+    def _residual_branch_losses(self, y0, delta_y, label):
+        """006 固定损失定义（无可调权重）：
+
+        main_loss = L(ŷ0, y)               —— 与 003 的主路径损失完全相同；
+        res_target = y - stopgrad(ŷ0)      —— stop-gradient 的 prediction residual；
+        res_loss  = L(Δŷ, res_target)      —— 同一 RankLoss 应用于 residual 任务。
+
+        res_target 已 detach，residual branch 的梯度不会经 target 回传到 ŷ0。
+        """
+        main_loss = self.rank_loss(y0, label)
+        res_target = label - y0.detach()
+        res_loss = self.rank_loss(delta_y, res_target)
+        return main_loss, res_loss, res_target
 
 
     def training_step(self, batch, batch_idx):
         feature, prior_factor, label = self._get_data(batch, batch_idx)
+
+        if self.z1_residual_branch:
+            out = self.forward(feature, prior_factor, return_components=True)
+            aux_loss = out['loss_imp']
+            main_loss, res_loss, _ = self._residual_branch_losses(
+                out['y0'], out['delta_y'], label)
+            # 固定组合：主预测损失 + residual 损失 + aux，均无可调权重
+            loss = main_loss + res_loss + self.aux_weight * aux_loss
+
+            self.log('train_loss', loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('train_mse_loss', main_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('train_res_loss', res_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('train_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            return {"loss": loss}
+
         y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
 
         mse_loss = self.rank_loss(y_pred, label)
@@ -219,6 +292,30 @@ class GenerateReturn(pl.LightningModule):
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
+        feature, prior_factor, label = self._get_data(batch, batch_idx)
+
+        if self.z1_residual_branch:
+            out = self.forward(feature, prior_factor, return_components=True)
+            y_pred = out['y_pred']      # 正式预测 ŷ = ŷ0 + Δŷ
+            aux_loss = out['loss_imp']
+            main_loss, res_loss, _ = self._residual_branch_losses(
+                out['y0'], out['delta_y'], label)
+            loss = main_loss + res_loss + self.aux_weight * aux_loss
+
+            self.log('val_loss', loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('val_mse_loss', main_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('val_res_loss', res_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('val_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+
+            daily_ic, daily_ric = calc_ic(y_pred.cpu().numpy(), label.cpu().numpy())
+            self.ic.append(daily_ic)
+            self.ric.append(daily_ric)
+            # 同步记录 z0 主路径 ŷ0 的 IC / RankIC，用于与最终 ŷ 对照
+            daily_ic0, daily_ric0 = calc_ic(out['y0'].detach().cpu().numpy(), label.cpu().numpy())
+            self.ic_main.append(daily_ic0)
+            self.ric_main.append(daily_ric0)
+            return {"loss": loss}
+
         feature, prior_factor, label = self._get_data(batch, batch_idx)
         y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
 
@@ -253,6 +350,17 @@ class GenerateReturn(pl.LightningModule):
             'Val_RICIR': current_ricir,
         }
         self.log_dict(other_metrics, on_step=False, on_epoch=True, logger=True, prog_bar=False, sync_dist=True)
+
+        if self.z1_residual_branch and self.ic_main:
+            # 006：z0 主路径 ŷ0 单独的验证指标，用于判断 z1 是否提供增量价值
+            main_metrics = {
+                'Val_IC_main': float(np.mean(self.ic_main)),
+                'Val_RIC_main': float(np.mean(self.ric_main)),
+            }
+            self.log_dict(main_metrics, on_step=False, on_epoch=True, logger=True, prog_bar=False, sync_dist=True)
+        self.ic_main = []
+        self.ric_main = []
+
         # Reset the IC and RIC lists
         self.ic = []
         self.ric = []

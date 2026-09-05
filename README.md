@@ -1,97 +1,145 @@
-# exp/003 — hvq-z0-only
+# exp/006 — hvq-predictive-residual-z1
 
-- Base: `exp/001-hvq-residual-2level`
-- Branch: `exp/003-hvq-z0-only`
+- Base: `exp/003-hvq-z0-only`
+- Branch: `exp/006-hvq-predictive-residual-z1`
+- Stage 1 provenance: 复用实验 001 的 exact Stage 1 checkpoint（`stage1_source: "001"`）
 
 ## Idea / Motivation
 
-001 使用两级 Residual HVQ：最终量化表示为 `z = z0 + z1`，其中 `z0` 是第 0 级
-VQ 输出，`z1` 是对残差 `h - z0` 进行第 1 级 VQ 得到的输出。
+Residual HVQ 的第二级表示 `z1` 在表示空间中学习的是一级量化后的
+**reconstruction residual**，但这种 residual 并不天然等价于未来收益预测所需的
+增量信息：
 
-003 是一个消融实验：**Stage 1 保持与 001 完全相同的两级 Residual HVQ 训练方式，
-但 Stage 2 收益预测阶段只使用第一级量化表示 `z0`，而不是 `z0 + z1`**。
+- 001 在 Stage 2 直接做 representation-level 融合 `z = z0 + z1`；
+- 003 去掉 `z1`（z0-only）后，部分预测/组合指标（RankIC、Sharpe、MDD）反而更好。
 
-目的：验证 Residual HVQ 的第二级残差量化 `z1` 是否真的为最终股票收益预测
-提供了有效信息。对比：
+这说明直接把 `z1` 加回表示可能无法有效利用第二级信息。006 不再将 `z1` 与
+`z0` 做表示层融合，而是把 `z1` 定义为一个专门用于**修正 z0 预测误差**的
+prediction-residual branch，明确赋予两级表示不同职责：
 
-- 001：Stage 2 input = `z0 + z1`
-- 003：Stage 2 input = `z0`
+- `z0`：学习主要、稳定的收益预测结构（与 003 完全一致）；
+- `z1`：仅学习 `z0` 主预测器尚未解释的 prediction residual。
 
-若 003 与 001 的预测/回测表现持平，说明第二级残差量化对下游预测没有实质
-贡献；若 003 显著变差，则说明 `z1` 携带了有效信息。
+核心假设：**representation residual → prediction residual 的职责对齐**，
+能让 `z1` 提供稳定的增量预测价值。
 
-## 核心修改（相对 base 001）
+## 与 base（003）的关系
 
-- `module/quantise_hvq.py::ResidualVectorQuantiser` 新增 `forward_level0(h_batch)`
-  方法：只运行第 0 级量化，返回 `(z_q0, loss_0, ([ppl_0], [min_enc_0], [idx_0]))`，
-  返回结构与 `forward` 同构。默认 `forward` 的 `z0 + z1` 行为完全不变，
-  Stage 1 训练不受影响。
+003 的 z0 主预测路径完全保留、逐位不变：
+
+```
+ŷ0 = F(z0)
+```
+
+006 在其上新增一条由 `z1` 驱动的 correction branch：
+
+```
+r   = y - stopgrad(ŷ0)      # stop-gradient 的预测残差目标
+Δŷ  = G(z1)                 # 独立、轻量的 residual prediction head
+ŷ   = ŷ0 + Δŷ               # 最终正式预测
+```
+
+三组受控对照：
+
+- 003：仅 z0 → `ŷ0`；
+- 001：representation-level `z0 + z1`；
+- 006：prediction-level `ŷ0 + Δŷ(z1)`。
+
+## 核心修改（相对 base 003）
+
+- `module/quantise_hvq.py::ResidualVectorQuantiser` 新增
+  `forward_two_levels(h_batch)`：分别返回两级量化输出 `(z_q0, z_q1)`，
+  逐级 STE 语义与 `forward` 完全相同（`z_q0 + z_q1` 数值上等于默认
+  `forward` 的 `z0+z1`）。默认 `forward` 行为不变，Stage 1 不受影响。
 - `trainer/train_ypred.py::GenerateReturn`：
-  - `__init__` 读取 `config['predictor'].get('z0_only', False)`；`z0_only=True`
-    时要求量化器为 `ResidualVectorQuantiser`，否则报错。
-  - `forward` 中 `z0_only=True` 时调用 `self.quantizer.forward_level0(h_batch)`
-    取 `z0`（随后照常 `.detach()`，送入 loading generator / latent value head /
-    return predictor）；否则走原 `self.quantizer(h_batch)` 路径（`z0 + z1`）。
-- `configs/config.yaml`：`predictor.z0_only: true`——默认配置即为 003 实验本身，
-  不需要任何实验特有 CLI override；`train.seed: 0`（Stage 2）保持不变。
-- 新增 `tests/test_z0_only.py`（6 个用例：z0 数值等于第 0 级 codebook 查表、
-  z0 排除第二级、返回接口与 forward 同构、STE 梯度回传、默认 forward 行为不变、
-  默认 config 已启用 z0_only）。
+  - 新增 `predictor.z1_residual_branch` 开关（默认 False 即 003 行为；
+    为 True 时要求 hvq 量化器且 `z0_only=True`，保证主路径与 003 一致）；
+  - 新增 `self.residual_head`（见下）；forward 中 `z_q0` 走与 003 完全相同
+    的主路径，`z_q1`（detach 后）只进入 residual head，二者绝无
+    representation-level 的 `z0+z1` 融合；
+  - `forward(..., return_components=True)` 额外返回 `y0` / `delta_y` /
+    `z_q1` 等诊断组件；默认 5 元组返回的第一个元素即最终 `ŷ = ŷ0 + Δŷ`，
+    与既有调用方（run_inference 等）兼容；
+  - 新增 `_residual_branch_losses(y0, delta_y, label)`，固定损失定义（见下）；
+  - validation 额外记录主路径 `Val_IC_main` / `Val_RIC_main` 与
+    `train/val_res_loss`。
+- `utils/test.py::run_inference`：当模型启用 `z1_residual_branch` 时，预测
+  DataFrame 增加 `score_main`（ŷ0）与 `delta`（Δŷ）两列，指标额外报告
+  `IC_main` / `ICIR_main` / `RankIC_main` / `RankICIR_main`（z0 主路径
+  ŷ0 的 test IC / RankIC）、`Delta_mean` / `Delta_std` / `Delta_abs_mean`
+  （Δŷ 基本统计）以及 `Corr_delta_resid` / `RankCorr_delta_resid`
+  （Δŷ 与真实残差 `y - ŷ0` 的 Pearson / Spearman 相关）。正式指标
+  （`IC` / `RankIC` 等）与保存的 `score` 列始终是最终 `ŷ = ŷ0 + Δŷ`。
+- `configs/config.yaml`：`predictor.z1_residual_branch: true`——默认配置即
+  006 实验本身，无需实验特有 CLI override；`predictor.z0_only: true` 保持。
+- 新增 `tests/test_predictive_residual_z1.py`（13 个用例）。
+- 分支根目录 `README.md` 改写为本实验说明。
 
-## 与 base（001）的区别
+## Residual head 结构（最小化）
 
-唯一核心实验变量：Stage 2 的量化表示输入由 `z0 + z1` 改为 `z0`。
-
-保持不变：
-
-- Stage 1 两级 HVQ 结构、训练目标（recon + vq + pred）与训练流程（固定
-  seed 42）与 001 完全一致——`forward` 默认行为未动，`stage1.py` 未改动。
-- 数据划分（train 2009–2020 / valid 2021–2022 / test 2023–2025，CSI300）、
-  训练协议（max 70 epoch、early stop patience 15）、回测协议
-  （Top30/Drop5，open 0.0005 / close 0.0015）、MoE/prior 等全部参数。
-- Stage 2 默认 `train.seed: 0`。
-
-## 运行
-
-默认配置即为本实验（z0-only），无需额外 override 启用核心改动：
-
-```bash
-# Stage 1（两级 Residual HVQ，与 001 相同；固定 seed 42）
-conda run -n prism-vq python stage1.py data.universe=csi300
-
-# Stage 2（z0-only；configs/config.yaml 的 stage2_presets.csi300.predictor.saved_model
-# 需填入 Stage 1 生成的 checkpoint 文件名）
-conda run -n prism-vq python stage2.py data.universe=csi300
+```python
+self.residual_head = nn.Linear(vq_embed_dim, 1)   # 128 -> 1
+Δŷ = self.residual_head(z_q1).squeeze(-1)         # z_q1 已 detach
 ```
 
-CLI override 仅用于统一执行层参数，例如：
+单层线性、无 bias 之外的任何结构：无 MLP、无 attention、无 MoE、无 market
+feature、无 sample/regime gate。参数量 **129**（128 权重 + 1 bias），只用于
+检验 z1 能否预测 z0 主路径尚未解释的残差。
 
-```bash
-# artifact 隔离：checkpoints/res/wandb 落到 artifacts/003/run/ 下，
-# Stage 2 也会从该目录的 checkpoints/ 加载 Stage 1 checkpoint
-python stage1.py data.universe=csi300 artifact_root=artifacts/003/run
-python stage2.py data.universe=csi300 artifact_root=artifacts/003/run \
-  predictor.saved_model="<stage1_ckpt_name>.ckpt"
+## Loss 定义（固定、无可调权重）
+
+复用 Stage 2 已有的 `RankLoss`（当前 `rank: 0`，即 MSE + 0×rank 项）：
+
+```
+main_loss  = RankLoss(ŷ0, y)                    # 与 003 的主路径损失完全相同
+res_target = y - stopgrad(ŷ0)                   # detach，不回传梯度到 ŷ0
+res_loss   = RankLoss(Δŷ, res_target)           # 同一 loss family 应用于残差任务
+loss       = main_loss + res_loss + aux_weight * aux_loss
 ```
 
-## 单元测试
+主路径损失与 003 逐位一致（`RankLoss(ŷ0, y)`），residual loss 以固定权重 1
+加入，`aux_weight` 是 003 已有的公共超参。**未引入任何新的可调 loss-weight
+超参数**，也无实验特有 CLI override。
 
-```bash
-conda run -n prism-vq python -m unittest tests.test_z0_only -v
-# 回归：001 的 HVQ 测试不受影响
-conda run -n prism-vq python -m unittest tests.test_hvq -v
-```
+## 与 base 的唯一区别
+
+唯一实验变量：在 003 的 z0-only Stage 2 预测路径之外，增加由 `z1` 驱动的
+prediction-residual correction branch，使最终预测从 `ŷ = ŷ0` 变为
+`ŷ = ŷ0 + Δŷ`（`Δŷ = G(z1)` 专门学习 `y - stopgrad(ŷ0)`）。
+
+保持不变：z0 主预测路径 `F(z0)`（loadings / MoE / latent head /
+return_predictor 结构、输入、超参与训练梯度）、z0 与 z1 的生成方式、
+Stage 1（不修改、不重新训练）、数据划分（train 2009–2020 / valid 2021–2022 /
+test 2023–2025，CSI300）、训练预算（max 70 epoch、patience 15）、
+`train.seed: 0`、回测协议（Top30/Drop5，open 0.0005 / close 0.0015，
+min_cost 0，close 成交，CN limit=None）、`aux_weight` 等全部超参。
+
+## Stage 1 provenance
+
+复用实验 001 的 exact Residual HVQ Stage 1 checkpoint（`stage1_source: "001"`，
+与 003 同源）：`artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`。
+两级量化器配置（`num_levels: 2`、`level_num_embed: [256, 256]`）、encoder 与
+RevIN 结构均与 001 一致；strict 加载验证 missing=0 / unexpected=0
+（见 `tests/test_predictive_residual_z1.py::test_stage1_strict_checkpoint_load`）。
 
 ## Smoke 状态
 
-PASS — 单元测试 6/6（z0-only）+ 14/14（001 HVQ 回归）通过；Stage 1 与
-Stage 2 各 1 epoch smoke 跑通（`artifact_root=artifacts/003/smoke`），Stage 2
-正确从 smoke artifact 目录加载两级 HVQ checkpoint 且实际使用 `z0`；全部产物
-落在 `artifacts/003/smoke/`，未写入公共 `checkpoints/` / `res/`。详见 `main`
-分支 `experiments/records/003-hvq-z0-only.md`。
+单元测试：PASS（13/13 新增 + 20/20 回归 `test_z0_only` / `test_hvq` /
+`test_protocol_metrics`，conda `prism-vq`）。
+Stage 2 smoke（1 epoch，`artifact_root=artifacts/006/smoke`，Stage 1 复用 001
+正式 checkpoint）：PASS——train / valid / test 全流程完成；ŷ0、Δŷ、ŷ 形状与
+`ŷ == ŷ0 + Δŷ` 数值恒等、stop-gradient、residual head 非零梯度与参数更新、
+Stage 1 无梯度、checkpoint 恢复、prediction/metric 诊断列均由
+`artifacts/006/smoke/verify_residual_smoke.py` 逐项验证通过
+（1-epoch smoke 指标仅供流程验证，不构成实验结论）。
 
----
+## 受控对照与 Phase 2 判读
 
-本仓库以 [PRISM-VQ](../PRISM-VQ)（IJCAI-ECAI 2026）为底；两级 Residual HVQ 的
-完整实现说明见 `exp/001-hvq-residual-2level` 分支 README。原始 PRISM-VQ 项目
-说明见 `main` 分支的 README。
+- 003：仅 z0 → `ŷ0`；001：representation-level `z0+z1`；006：prediction-level
+  `ŷ0 + Δŷ(z1)`。
+- Phase 2 正式结果中，`score` 列为最终 `ŷ`，`score_main` 列为 z0 主路径
+  `ŷ0`，`delta` 列为 `Δŷ`；指标含 `IC_main` / `RankIC_main`（ŷ0）、
+  `Delta_*`（Δŷ 统计）、`Corr_delta_resid` / `RankCorr_delta_resid`
+  （Δŷ 与真实残差的相关），用于回答：residual branch 是否改善相对 003 的
+  IC / RankIC；最终 ŷ 是否优于单独 ŷ0；Δŷ 幅度是否非零且稳定；Δŷ 与真实
+  residual 是否有效相关；z1 是否因此获得可观测的增量预测价值。
