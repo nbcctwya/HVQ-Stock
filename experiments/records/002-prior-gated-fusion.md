@@ -97,6 +97,6 @@ Turnover: 0.3251
 
 ## Conclusion
 
-Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`；Stage 2 seed 0。
+Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`（self-trained）；Stage 2 seed 0。
 
 产物：`artifacts/002/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
