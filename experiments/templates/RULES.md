@@ -82,6 +82,22 @@
 - `backtest_qlib.py` 已支持 `--pred_path` / `--output_dir`，
   回测产物跟随预测文件所在目录，无需额外改动。
 
+### 3.2 Stage 1 复用（stage1_source）
+
+- queue 条目支持可选字段 `stage1_source`，缺省视为 `self`
+  （本实验自己训练 Stage 1），保持向后兼容。
+- 只修改 Stage 2 的实验（例如只改预测头或融合方式、Stage 1 完全不变），
+  可以显式指定 `stage1_source: "<已有实验ID>"`，复用该实验已完成的正式
+  Stage 1 best checkpoint，保证 controlled experiment 并节省 GPU 时间。
+- 是否允许复用由创建实验的 AI 在第一阶段明确判断并写进 queue；
+  执行器不得自动推断或猜测 Stage 1 source。
+- 指定复用前必须确认 source 实验的 Stage 1 模型结构、量化器配置与数据
+  划分和本实验完全一致（checkpoint 可以 strict 加载到本实验的 Stage 1
+  模型）。
+- 执行器复用时从 `artifacts/<source_id>/run/.stage1.done` 读取精确的
+  Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并把实验标记为
+  failed，不允许偷偷改为重新训练 Stage 1。
+
 ### 4. 开发与验证（在实验分支上）
 
 - 开发完成后必须执行单元测试和最小 smoke test。
@@ -100,22 +116,6 @@
 4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
    （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
 5. 在 `main` 上 commit record + queue 的变更。
-
-### 3.2 Stage 1 复用（stage1_source）
-
-- queue 条目支持可选字段 `stage1_source`，缺省视为 `self`
-  （本实验自己训练 Stage 1），保持向后兼容。
-- 只修改 Stage 2 的实验（例如只改预测头或融合方式、Stage 1 完全不变），
-  可以显式指定 `stage1_source: "<已有实验ID>"`，复用该实验已完成的正式
-  Stage 1 best checkpoint，保证 controlled experiment 并节省 GPU 时间。
-- 是否允许复用由创建实验的 AI 在第一阶段明确判断并写进 queue；
-  执行器不得自动推断或猜测 Stage 1 source。
-- 指定复用前必须确认 source 实验的 Stage 1 模型结构、量化器配置与数据
-  划分和本实验完全一致（checkpoint 可以 strict 加载到本实验的 Stage 1
-  模型）。
-- 执行器复用时从 `artifacts/<source_id>/run/.stage1.done` 读取精确的
-  Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并把实验标记为
-  failed，不允许偷偷改为重新训练 Stage 1。
 
 ### 6. 边界
 
