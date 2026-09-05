@@ -122,6 +122,21 @@ def checkout(repo: Path, branch: str) -> None:
     log(f"checked out {branch}")
 
 
+def ensure_control_branch(repo: Path) -> None:
+    """The queue/records on main are the canonical control state.
+
+    A previous run may have been interrupted (kill, Ctrl+C, crash) while an
+    experiment branch was checked out; that branch's queue.yaml can be a
+    stale copy. Always return to main before reading the queue. The dirty
+    worktree check in checkout() still applies, so tracked user changes are
+    never silently overwritten.
+    """
+    current = git(repo, "branch", "--show-current").stdout.strip()
+    if current != "main":
+        log(f"repo is on {current or 'detached HEAD'}; returning to main before reading the queue")
+        checkout(repo, "main")
+
+
 def run_dir_for(repo: Path, exp_id: str) -> Path:
     return repo / "artifacts" / exp_id / "run"
 
@@ -553,6 +568,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
+    ensure_control_branch(repo)
     queue = load_queue(repo)
     experiments = sorted(queue["experiments"], key=lambda e: e["id"])
 

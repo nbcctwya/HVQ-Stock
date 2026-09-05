@@ -164,7 +164,10 @@ def _paper_metrics(simple_return: pd.Series, turnover: Optional[pd.Series], name
     # g_{p,t}=log(1+r_{p,t})，AR=exp(252*mean(g))-1。
     daily_log_return = np.log1p(simple_return)
     wealth = np.exp(daily_log_return.cumsum())
-    drawdown = wealth / wealth.cummax() - 1.0
+    # 初始净值 1.0 必须计入 running peak，否则首日（或净值从未超过 1 的
+    # 阶段）的回撤会被漏掉，例如单日 -10% 会错误得到 MDD=0。
+    peak = np.maximum(wealth.cummax(), 1.0)
+    drawdown = wealth / peak - 1.0
 
     annual_return = np.expm1(daily_log_return.mean() * TRADING_DAYS)
     annual_std = daily_log_return.std() * np.sqrt(TRADING_DAYS)

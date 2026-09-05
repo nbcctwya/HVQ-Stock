@@ -311,6 +311,19 @@ class GenerateReturn(pl.LightningModule):
         print(f"--- Quantizer loaded: missing={len(missing_quantizer)}, unexpected={len(unexpected_quantizer)}")
         print(f"--- RevIN loaded: missing={len(missing_revin)}, unexpected={len(unexpected_revin)}")
 
+    def train(self, mode=True):
+        # Lightning 训练时会对整个模块递归调用 .train()，把冻结的 Stage 1
+        # 子模块重新切回 training mode：VectorQuantiser 在 training mode 下会
+        # 更新 embed_prob 并通过 .data 改写 codebook，encoder 中 Transformer
+        # 的 dropout 也会让 frozen representation 在 Stage 2 训练期间保持
+        # 随机。requires_grad=False 无法阻止这些 mode 副作用，因此这里强制
+        # 预训练的 encoder / quantizer / revin 始终保持 eval。
+        super().train(mode)
+        self.encoder.eval()
+        self.quantizer.eval()
+        self.revin.eval()
+        return self
+
     def freeze_vqvae(self):
         for param in self.encoder.parameters():
             param.requires_grad = False

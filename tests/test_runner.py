@@ -5,6 +5,7 @@ training, or git operations are involved.
 """
 
 import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -283,6 +284,78 @@ class Stage2MarkerConsistencyTest(unittest.TestCase):
         self.assertFalse((self.run_dir / ".backtest.done").exists())
         info = runner.read_stage1_marker(self.run_dir / ".stage2.done")
         self.assertEqual(info["ckpt"], str(self.ckpt_b))
+
+
+class ColdResumeTest(unittest.TestCase):
+    """Fix 3 (cold resume): the runner must read the canonical queue on main,
+    even when a previous interrupted run left an experiment branch checked out.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self._git("init")
+        # git 2.25 has no `init -b`; point HEAD at main before the first commit.
+        self._git("symbolic-ref", "HEAD", "refs/heads/main")
+        (self.repo / "experiments").mkdir()
+        # Old queue without 003; the experiment branch is created from here.
+        (self.repo / "experiments" / "queue.yaml").write_text(
+            'experiments:\n  - id: "001"\n    status: done\n'
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "old queue")
+        self._git("branch", "exp/003-old")
+        # main advances: 003 is now running (interrupted mid-execution).
+        (self.repo / "experiments" / "queue.yaml").write_text(
+            'experiments:\n'
+            '  - id: "001"\n    status: done\n'
+            '  - id: "003"\n    status: running\n'
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "003 running")
+        # Simulate the interrupted state: stuck on the stale exp branch.
+        self._git("checkout", "exp/003-old")
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", "-C", str(self.repo),
+             "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+            check=True, capture_output=True,
+        )
+
+    def _current_branch(self):
+        return runner.git(self.repo, "branch", "--show-current").stdout.strip()
+
+    def test_restart_from_exp_branch_reads_canonical_queue(self):
+        # The stale branch queue does not contain 003 at all.
+        stale = runner.load_queue(self.repo)
+        self.assertNotIn("003", [e["id"] for e in stale["experiments"]])
+
+        runner.ensure_control_branch(self.repo)
+
+        self.assertEqual(self._current_branch(), "main")
+        queue = runner.load_queue(self.repo)
+        selected = runner.select_experiments(queue["experiments"])
+        self.assertEqual([e["id"] for e in selected], ["003"])
+
+    def test_start_from_main_is_unaffected(self):
+        self._git("checkout", "main")
+        runner.ensure_control_branch(self.repo)
+        self.assertEqual(self._current_branch(), "main")
+        queue = runner.load_queue(self.repo)
+        selected = runner.select_experiments(queue["experiments"])
+        self.assertEqual([e["id"] for e in selected], ["003"])
+
+    def test_dirty_tracked_changes_are_not_overwritten(self):
+        (self.repo / "experiments" / "queue.yaml").write_text("dirty edit\n")
+        with self.assertRaises(runner.StageError):
+            runner.ensure_control_branch(self.repo)
+        # Still on the experiment branch; the dirty file is untouched.
+        self.assertEqual(self._current_branch(), "exp/003-old")
+        self.assertEqual(
+            (self.repo / "experiments" / "queue.yaml").read_text(), "dirty edit\n"
+        )
 
 
 if __name__ == "__main__":
