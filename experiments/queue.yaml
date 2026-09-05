@@ -1,6 +1,6 @@
 # Experiment queue — real queue consumed by the stage-2 executor.
 #
-# Rules (see templates/RULES.md for the full specification):
+# Rules (see PHASE1_RULES.md for the full specification):
 #   - Experiments are sorted by id (ascending).
 #   - New experiments are appended only; ids are never renumbered or reused.
 #   - An experiment may enter this queue only after code development is

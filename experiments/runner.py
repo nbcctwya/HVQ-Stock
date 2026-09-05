@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 2 executor: consume pending experiments from experiments/queue.yaml.
 
-Fixed pipeline per experiment (see experiments/templates/RULES.md):
+Fixed pipeline per experiment (see experiments/PHASE1_RULES.md):
 
     pending -> checkout exp branch -> stage1 -> best stage1 checkpoint
             -> stage2 (seed 0) -> prediction/metrics -> qlib backtest

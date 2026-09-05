@@ -8,7 +8,7 @@ Phase 2 是**固定、确定性、可恢复的正式实验执行阶段**。
 - Phase 2 不提出新实验、不修改研究 Idea、不是第二个 Phase 1。
 
 实验创建流程（Idea、分支、smoke、入队）由 Phase 1 定义，见
-`templates/RULES.md`；本文件只规范实验进入 queue 之后的执行行为。
+`PHASE1_RULES.md`；本文件只规范实验进入 queue 之后的执行行为。
 
 ## 1. 职责
 
