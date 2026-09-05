@@ -240,7 +240,9 @@ class Stage2MarkerConsistencyTest(unittest.TestCase):
         (self.res / "0_metric.csv").write_text(",values\nIC,0.01\n")
 
     def test_same_ckpt_skips_stage2(self):
-        (self.run_dir / ".stage2.done").write_text(f"res=fake_run\nckpt={self.ckpt_a}\n")
+        (self.run_dir / ".stage2.done").write_text(
+            f"res=fake_run\nckpt={self.ckpt_a}\nseed=0\n"
+        )
 
         def forbidden(*args, **kwargs):
             raise AssertionError("stage2 must not run")
@@ -257,13 +259,15 @@ class Stage2MarkerConsistencyTest(unittest.TestCase):
         # Marker stores the bare filename; current ckpt arrives as an
         # absolute path — they must be recognized as the same checkpoint.
         (self.run_dir / ".stage2.done").write_text(
-            f"res=fake_run\nckpt={self.ckpt_a.name}\n"
+            f"res=fake_run\nckpt={self.ckpt_a.name}\nseed=0\n"
         )
         res = runner.stage2(self.repo, self.run_dir, self.ckpt_a)
         self.assertEqual(res, self.res)
 
     def test_changed_ckpt_reruns_stage2_and_invalidates_backtest(self):
-        (self.run_dir / ".stage2.done").write_text(f"res=fake_run\nckpt={self.ckpt_a}\n")
+        (self.run_dir / ".stage2.done").write_text(
+            f"res=fake_run\nckpt={self.ckpt_a}\nseed=0\n"
+        )
         (self.run_dir / ".backtest.done").write_text("metric=x\n")
 
         calls = []
@@ -356,6 +360,312 @@ class ColdResumeTest(unittest.TestCase):
         self.assertEqual(
             (self.repo / "experiments" / "queue.yaml").read_text(), "dirty edit\n"
         )
+
+
+class CommitPinningTest(unittest.TestCase):
+    """A queued experiment executes its pinned commit, never the branch HEAD.
+
+    Regression: advancing the experiment branch after queueing must not
+    silently change what the queued experiment runs.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self._git("init")
+        self._git("symbolic-ref", "HEAD", "refs/heads/main")
+        (self.repo / "code.py").write_text("VERSION = 1\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "base")
+        self._git("branch", "exp/004-x")
+        # The experiment's final code at queue time (pinned).
+        self._git("checkout", "exp/004-x")
+        (self.repo / "code.py").write_text("VERSION = 2\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "experiment code")
+        self.pinned = self._git("rev-parse", "HEAD").stdout.strip()
+        # The branch advances AFTER queueing (must not affect the experiment).
+        (self.repo / "code.py").write_text("VERSION = 3\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "post-queue change")
+        self.later = self._git("rev-parse", "HEAD").stdout.strip()
+        self._git("checkout", "main")
+
+    def _git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.repo),
+             "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+            check=True, capture_output=True, text=True,
+        )
+
+    def test_executes_pinned_commit_not_branch_head(self):
+        exp = {"id": "004", "branch": "exp/004-x", "commit": self.pinned}
+        commit = runner.resolve_pinned_commit(self.repo, exp)
+        self.assertEqual(commit, self.pinned)
+
+        runner.checkout_experiment(self.repo, "exp/004-x", commit)
+
+        head = runner.git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(head, self.pinned)
+        self.assertEqual((self.repo / "code.py").read_text(), "VERSION = 2\n")
+        # The branch ref itself is untouched and still points at the later commit.
+        branch_head = runner.git(self.repo, "rev-parse", "exp/004-x").stdout.strip()
+        self.assertEqual(branch_head, self.later)
+
+    def test_short_or_full_pin_resolves_to_full_sha(self):
+        exp = {"id": "004", "commit": self.pinned[:7]}
+        self.assertEqual(runner.resolve_pinned_commit(self.repo, exp), self.pinned)
+
+    def test_missing_commit_is_rejected(self):
+        with self.assertRaises(runner.StageError):
+            runner.resolve_pinned_commit(self.repo, {"id": "004"})
+
+    def test_unknown_commit_is_rejected(self):
+        with self.assertRaises(runner.StageError):
+            runner.resolve_pinned_commit(
+                self.repo, {"id": "004", "commit": "0" * 40}
+            )
+
+
+class MarkerCommitProvenanceTest(unittest.TestCase):
+    """Markers recorded under a different pinned commit must not be skipped."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        self.src_run = self.repo / "artifacts" / "001" / "run"
+        self.src_ckpt = make_ckpt(self.src_run, "hvq-epoch=5-val_loss=0.4592.ckpt")
+        (self.src_run / ".stage1.done").write_text(
+            f"best={self.src_ckpt.name}\nval_loss=0.4592\ncommit=COMMIT_A\n"
+        )
+        self.run_dir = self.repo / "artifacts" / "010" / "run"
+        self.run_dir.mkdir(parents=True)
+        self.exp = {
+            "id": "010", "commit": "COMMIT_B", "stage1_source": "001",
+        }
+
+    def test_stage1_marker_with_old_commit_is_invalidated(self):
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={self.src_ckpt.resolve()}\nsource=001\nreused=true\ncommit=COMMIT_A\n"
+        )
+        (self.run_dir / ".stage2.done").write_text("res=x\n")
+        (self.run_dir / ".backtest.done").write_text("metric=y\n")
+
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, self.exp)
+
+        self.assertEqual(ckpt, self.src_ckpt.resolve())
+        self.assertEqual(prov["mode"], "reused")
+        # Downstream markers invalidated; own marker re-recorded with the
+        # current pinned commit.
+        self.assertFalse((self.run_dir / ".stage2.done").exists())
+        self.assertFalse((self.run_dir / ".backtest.done").exists())
+        info = runner.read_stage1_marker(self.run_dir / ".stage1.done")
+        self.assertEqual(info["commit"], "COMMIT_B")
+
+    def test_stage1_marker_with_matching_commit_resumes(self):
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={self.src_ckpt.resolve()}\nsource=001\nreused=true\ncommit=COMMIT_B\n"
+        )
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, self.exp)
+        self.assertEqual(ckpt, self.src_ckpt.resolve())
+        self.assertEqual(prov["mode"], "reused")
+
+    def _make_stage2_outputs(self):
+        res = self.run_dir / "res" / "fake_run"
+        res.mkdir(parents=True, exist_ok=True)
+        (res / "0_best.pkl").write_bytes(b"pred")
+        (res / "0_metric.csv").write_text(",values\nIC,0.01\n")
+        return res
+
+    def test_stage2_marker_with_old_commit_reruns(self):
+        res = self._make_stage2_outputs()
+        ckpt = self.src_ckpt.resolve()
+        (self.run_dir / ".stage2.done").write_text(
+            f"res=fake_run\nckpt={ckpt}\nseed=0\ncommit=COMMIT_A\n"
+        )
+        (self.run_dir / ".backtest.done").write_text("metric=y\n")
+
+        calls = []
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda cmd, log_path, cwd, attempts: calls.append(cmd)
+        try:
+            out = runner.stage2(self.repo, self.run_dir, ckpt, "COMMIT_B")
+        finally:
+            runner.run_with_retries = orig
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out, res)
+        self.assertFalse((self.run_dir / ".backtest.done").exists())
+        info = runner.read_stage1_marker(self.run_dir / ".stage2.done")
+        self.assertEqual(info["commit"], "COMMIT_B")
+        self.assertEqual(info["seed"], "0")
+
+    def test_stage2_marker_with_matching_commit_skips(self):
+        res = self._make_stage2_outputs()
+        ckpt = self.src_ckpt.resolve()
+        (self.run_dir / ".stage2.done").write_text(
+            f"res=fake_run\nckpt={ckpt}\nseed=0\ncommit=COMMIT_B\n"
+        )
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("stage2 must not run")
+        )
+        try:
+            out = runner.stage2(self.repo, self.run_dir, ckpt, "COMMIT_B")
+        finally:
+            runner.run_with_retries = orig
+        self.assertEqual(out, res)
+
+
+class BacktestProtocolProvenanceTest(unittest.TestCase):
+    """A .backtest.done marker is valid only for the protocol that produced it."""
+
+    UNIVERSE = "csi300"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        self.run_dir = self.repo / "artifacts" / "010" / "run"
+        self.res = self.run_dir / "res" / "fake_run"
+        bt = self.res / "backtest" / "seed0_top30_drop5"
+        bt.mkdir(parents=True)
+        (bt / "portfolio_metric.csv").write_text(
+            ",project_portfolio,project_benchmark\nMDD,-0.1,-0.2\n"
+        )
+        self.metric = bt / "portfolio_metric.csv"
+        self.sig = runner.backtest_protocol_sig(self.UNIVERSE)
+
+    def test_matching_protocol_and_commit_skips(self):
+        (self.run_dir / ".backtest.done").write_text(
+            f"metric=res/fake_run/backtest/seed0_top30_drop5/portfolio_metric.csv\n"
+            f"protocol={self.sig}\ncommit=COMMIT_B\n"
+        )
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("backtest must not run")
+        )
+        try:
+            out = runner.backtest(
+                self.repo, self.run_dir, self.res, self.UNIVERSE, "COMMIT_B"
+            )
+        finally:
+            runner.run_with_retries = orig
+        self.assertEqual(out, self.metric)
+
+    def test_changed_protocol_reruns_backtest(self):
+        (self.run_dir / ".backtest.done").write_text(
+            "metric=res/fake_run/backtest/seed0_top30_drop5/portfolio_metric.csv\n"
+            "protocol=universe=csi300;seed=0;args=--topk 50\ncommit=COMMIT_B\n"
+        )
+        calls = []
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda cmd, log_path, cwd, attempts: calls.append(cmd)
+        try:
+            out = runner.backtest(
+                self.repo, self.run_dir, self.res, self.UNIVERSE, "COMMIT_B"
+            )
+        finally:
+            runner.run_with_retries = orig
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out, self.metric)
+        info = runner.read_stage1_marker(self.run_dir / ".backtest.done")
+        self.assertEqual(info["protocol"], self.sig)
+        self.assertEqual(info["commit"], "COMMIT_B")
+
+    def test_changed_commit_reruns_backtest(self):
+        (self.run_dir / ".backtest.done").write_text(
+            "metric=res/fake_run/backtest/seed0_top30_drop5/portfolio_metric.csv\n"
+            f"protocol={self.sig}\ncommit=COMMIT_A\n"
+        )
+        calls = []
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda cmd, log_path, cwd, attempts: calls.append(cmd)
+        try:
+            runner.backtest(self.repo, self.run_dir, self.res, self.UNIVERSE, "COMMIT_B")
+        finally:
+            runner.run_with_retries = orig
+        self.assertEqual(len(calls), 1)
+
+
+class ExternalStage1Test(unittest.TestCase):
+    """stage1_source: external reuses an exact baseline/external checkpoint."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        # The external checkpoint deliberately lives OUTSIDE repo/artifacts
+        # (e.g. the PRISM-VQ baseline checkpoint in a sibling repo).
+        self.ext = self.tmp / "external" / "baseline-epoch=7-val_loss=0.5712.ckpt"
+        self.ext.parent.mkdir(parents=True)
+        self.ext.write_bytes(b"x" * 16)
+        self.run_dir = self.repo / "artifacts" / "011" / "run"
+        self.run_dir.mkdir(parents=True)
+        self.exp = {
+            "id": "011", "commit": "COMMIT_B",
+            "stage1_source": "external", "stage1_ckpt": str(self.ext),
+        }
+
+    def test_external_reuse_and_resume(self):
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, self.exp)
+
+        self.assertEqual(ckpt, self.ext.resolve())
+        self.assertEqual(prov["mode"], "reused")
+        self.assertEqual(prov["source_id"], "external")
+
+        info = runner.read_stage1_marker(self.run_dir / ".stage1.done")
+        self.assertEqual(info["reused"], "true")
+        self.assertEqual(info["source"], "external")
+        self.assertEqual(info["commit"], "COMMIT_B")
+        self.assertEqual(info["best"], str(self.ext.resolve()))
+
+        # Resume resolves the same external checkpoint without any training.
+        ckpt2, prov2 = runner.stage1(self.repo, self.run_dir, self.exp)
+        self.assertEqual(ckpt2, self.ext.resolve())
+        self.assertEqual(prov2["mode"], "reused")
+
+    def test_missing_external_ckpt_raises_instead_of_retraining(self):
+        exp = dict(self.exp, stage1_ckpt=str(self.tmp / "gone.ckpt"))
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, exp)
+        self.assertFalse((self.run_dir / ".stage1.done").exists())
+
+    def test_missing_stage1_ckpt_field_raises(self):
+        exp = {"id": "011", "stage1_source": "external"}
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, exp)
+
+    def test_marker_pointing_elsewhere_is_invalid_and_reresolved(self):
+        # A stale/tampered marker records source=external but points at a
+        # different (artifacts-internal) checkpoint: it must not be trusted.
+        other = make_ckpt(self.run_dir, "other-epoch=1-val_loss=0.5000.ckpt")
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={other.resolve()}\nsource=external\nreused=true\ncommit=COMMIT_B\n"
+        )
+        (self.run_dir / ".stage2.done").write_text("res=x\n")
+
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, self.exp)
+
+        self.assertEqual(ckpt, self.ext.resolve())
+        self.assertFalse((self.run_dir / ".stage2.done").exists())
+        info = runner.read_stage1_marker(self.run_dir / ".stage1.done")
+        self.assertEqual(info["best"], str(self.ext.resolve()))
+
+    def test_marker_pointing_to_deleted_external_file_reresolves_then_raises(self):
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={self.ext.resolve()}\nsource=external\nreused=true\ncommit=COMMIT_B\n"
+        )
+        self.ext.unlink()
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, self.exp)
+
+    def test_relative_stage1_ckpt_resolves_against_repo(self):
+        rel_ckpt = self.repo / "artifacts" / "baseline.ckpt"
+        rel_ckpt.write_bytes(b"x" * 16)
+        exp = dict(self.exp, stage1_ckpt="artifacts/baseline.ckpt")
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, exp)
+        self.assertEqual(ckpt, rel_ckpt.resolve())
+        self.assertEqual(prov["source_id"], "external")
 
 
 if __name__ == "__main__":

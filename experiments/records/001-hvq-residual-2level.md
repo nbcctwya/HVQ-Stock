@@ -40,6 +40,9 @@
 Base: main
 Branch: exp/001-hvq-residual-2level
 Commit: 0a75fd1（训练代码；其后 ab3e117 仅将 Stage 1 checkpoint 名填入 config，不影响训练行为）
+Queue pinned commit: ea11ab39cadaffcd0ee9d2d9ba0a94429113de82
+（实验代码 0a75fd1/ab3e117 + 公共 correctness fix ea11ab3；Phase 2 只执行该 pinned commit）
+Stage 1 provenance: self（queue `stage1_source: self`）
 
 ## Smoke Test
 

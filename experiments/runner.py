@@ -10,19 +10,31 @@ Fixed pipeline per experiment (see experiments/templates/RULES.md):
 All formal artifacts live under ``artifacts/<ID>/run/`` via the
 ``artifact_root`` execution-layer override. The runner is deterministic and
 resumable: a stage is re-executed only when its completion marker or its
-expected artifacts are missing. Stage 1 resume reads the exact checkpoint
-recorded in ``.stage1.done`` instead of rescanning the shared checkpoint
-directory.
+expected artifacts are missing, or when the marker's recorded provenance
+(pinned commit, stage1 checkpoint/source, backtest protocol) no longer
+matches the queue entry. Stage 1 resume reads the exact checkpoint recorded
+in ``.stage1.done`` instead of rescanning the shared checkpoint directory.
+
+A queued experiment is IMMUTABLE: the queue entry's ``commit`` field pins
+the exact code version, and Phase 2 checks out that pinned commit (detached
+HEAD), never the experiment branch's latest HEAD. If the experiment logic
+changes, a new experiment id must be created instead of mutating the entry.
 
 By default the runner consumes ``pending`` and ``running`` entries (a
 ``running`` entry means a previous execution was interrupted; it resumes
 from the existing markers/artifacts). ``done`` is always skipped; ``failed``
 is retried only via an explicit ``--only``.
 
-A queue entry may set ``stage1_source: "<id>"`` to reuse that experiment's
-formal stage1 best checkpoint instead of training its own (stage2-only
-experiments). The default ``self`` trains stage1 normally. The source is
-declared by the experiment author in Phase 1; the runner never infers it.
+A queue entry declares its stage1 provenance via ``stage1_source``:
+
+- ``self`` (default): train its own stage1;
+- ``"<id>"``: reuse that experiment's exact formal stage1 best checkpoint;
+- ``external`` together with ``stage1_ckpt: <path>``: reuse an exact
+  baseline/external checkpoint (relative paths resolve against the repo
+  root).
+
+The source is declared by the experiment author in Phase 1; the runner never
+infers it.
 
 The runner only invokes the existing entry points (stage1.py, stage2.py,
 backtest_qlib.py) and never touches experiment logic, hyperparameters, data
@@ -122,6 +134,47 @@ def checkout(repo: Path, branch: str) -> None:
     log(f"checked out {branch}")
 
 
+def resolve_pinned_commit(repo: Path, exp: dict) -> str:
+    """Return the full sha of the experiment's pinned commit.
+
+    A queued experiment is immutable: the queue entry's ``commit`` field is
+    the exact code version Phase 2 must execute. The field is required.
+    """
+    commit = str(exp.get("commit") or "").strip()
+    if not commit:
+        raise StageError(
+            f"experiment {exp.get('id')}: queue entry is missing the pinned "
+            f"'commit' field; a queued experiment must pin its exact code version"
+        )
+    res = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}", check=False)
+    if res.returncode != 0:
+        raise StageError(
+            f"experiment {exp.get('id')}: pinned commit {commit!r} not found in the repo"
+        )
+    return res.stdout.strip()
+
+
+def checkout_experiment(repo: Path, branch: str, commit: str) -> None:
+    """Check out the experiment's pinned commit (detached HEAD).
+
+    The branch HEAD is intentionally NOT used: even if the branch advances
+    after the experiment entered the queue, the queued experiment still
+    executes exactly the pinned commit.
+    """
+    head = git(repo, "rev-parse", branch, check=False)
+    if head.returncode == 0 and head.stdout.strip() != commit:
+        log(
+            f"WARNING: branch {branch} HEAD ({head.stdout.strip()[:12]}) differs from "
+            f"the pinned commit ({commit[:12]}); executing the pinned commit"
+        )
+    checkout(repo, commit)
+    actual = git(repo, "rev-parse", "HEAD").stdout.strip()
+    if actual != commit:
+        raise StageError(
+            f"checkout of pinned commit failed: HEAD is {actual}, expected {commit}"
+        )
+
+
 def ensure_control_branch(repo: Path) -> None:
     """The queue/records on main are the canonical control state.
 
@@ -176,19 +229,23 @@ def read_stage1_marker(marker_path: Path) -> dict:
     return info
 
 
-def resolve_marker_ckpt(repo: Path, run_dir: Path, info: dict):
+def resolve_marker_ckpt(repo: Path, run_dir: Path, info: dict, allow: Path = None):
     """Resolve the checkpoint recorded in a .stage1.done marker and validate it.
 
     A bare filename resolves against ``run_dir/checkpoints`` (self-trained);
     an absolute path is used as-is (reused from another experiment's
     artifacts). Either way the file must exist, be non-empty, and live under
-    ``repo/artifacts``.
+    ``repo/artifacts`` — unless it is exactly ``allow``, the queue-declared
+    external checkpoint (``stage1_source: external``), which may live
+    outside the repo.
     """
     best = info.get("best")
     if not best:
         return None
     p = _normalize_ckpt_ref(run_dir, best)
-    if not p.is_relative_to((repo / "artifacts").resolve()):
+    if allow is not None and p == allow.resolve():
+        pass
+    elif not p.is_relative_to((repo / "artifacts").resolve()):
         return None
     if not p.is_file() or p.stat().st_size == 0:
         return None
@@ -204,15 +261,61 @@ def _normalize_ckpt_ref(run_dir: Path, ref: str) -> Path:
     return p.resolve()
 
 
+def marker_commit_matches(info: dict, commit: str) -> bool:
+    """A marker is valid only for the pinned commit that produced it.
+
+    Markers written before commit pinning (no ``commit=`` line) do not match
+    a pinned experiment and are correctly invalidated. An empty ``commit``
+    (callers without pinning, e.g. legacy/unit-test paths) skips the check.
+    """
+    if not commit:
+        return True
+    return info.get("commit") == commit
+
+
 def marker_matches_source(info: dict, source: str) -> bool:
     """Check .stage1.done provenance against the queue's current stage1_source.
 
-    ``self`` accepts only self-trained markers; ``<ID>`` accepts only markers
-    recorded as reused from exactly that source experiment.
+    ``self`` accepts only self-trained markers; ``external`` accepts only
+    markers recorded as reused from an external checkpoint; ``<ID>`` accepts
+    only markers recorded as reused from exactly that source experiment.
     """
     if source == "self":
         return info.get("reused") != "true"
     return info.get("reused") == "true" and info.get("source") == source
+
+
+def external_stage1_ckpt(repo: Path, exp: dict) -> Path:
+    """Resolve and validate the exact external/baseline stage1 checkpoint
+    declared by ``stage1_source: external`` + ``stage1_ckpt: <path>``.
+
+    Relative paths resolve against the repo root. The file must exist and be
+    non-empty; the runner never silently retrains stage1 for a stage2-only
+    experiment.
+    """
+    ref = str(exp.get("stage1_ckpt") or "").strip()
+    if not ref:
+        raise StageError(
+            f"experiment {exp['id']}: stage1_source=external requires a "
+            f"'stage1_ckpt' path in the queue entry"
+        )
+    p = Path(ref)
+    if not p.is_absolute():
+        p = repo / p
+    p = p.resolve()
+    if not p.is_file() or p.stat().st_size == 0:
+        raise StageError(
+            f"experiment {exp['id']}: external stage1 checkpoint missing or "
+            f"empty: {p}"
+        )
+    return p
+
+
+def backtest_protocol_sig(universe: str) -> str:
+    """Signature of the fixed backtest protocol a .backtest.done marker is
+    valid for. Any change to the universe or BACKTEST_ARGS invalidates old
+    markers (string comparison; no hashing)."""
+    return f"universe={universe};seed={STAGE2_SEED};args={' '.join(BACKTEST_ARGS)}"
 
 
 def find_stage2_outputs(run_dir: Path):
@@ -341,33 +444,54 @@ def stage1(repo: Path, run_dir: Path, exp: dict):
     """Return (ckpt_path, provenance) for the experiment's stage1 checkpoint."""
     marker = run_dir / ".stage1.done"
     source = str(exp.get("stage1_source") or "self")
+    commit = str(exp.get("commit") or "")
+
+    # Fail fast on a missing/invalid external checkpoint, even when a marker
+    # exists: without the file the marker can never validate anyway.
+    external = external_stage1_ckpt(repo, exp) if source == "external" else None
 
     # Resume path: trust the exact checkpoint recorded in the marker instead
     # of rescanning the shared checkpoint directory. The marker is only valid
-    # when its provenance matches the queue's current stage1_source.
+    # when its provenance (pinned commit + stage1 source + checkpoint) matches
+    # the queue's current declaration.
     if marker.exists():
         info = read_stage1_marker(marker)
-        ckpt = resolve_marker_ckpt(repo, run_dir, info)
-        if ckpt is not None and marker_matches_source(info, source):
+        ckpt = resolve_marker_ckpt(repo, run_dir, info, allow=external)
+        if (
+            ckpt is not None
+            and marker_commit_matches(info, commit)
+            and marker_matches_source(info, source)
+            and (source != "external" or ckpt == external)
+        ):
             mode = "reused" if info.get("reused") == "true" else "self"
             log(f"stage1 already complete (best={ckpt.name}, mode={mode}), skipping")
             return ckpt, {"mode": mode, "source_id": info.get("source"), "ckpt": str(ckpt)}
-        if ckpt is not None:
-            log(
-                f"stage1 marker provenance (reused={info.get('reused')}, "
-                f"source={info.get('source')}) does not match current "
-                f"stage1_source={source}; re-resolving stage1"
+        reasons = []
+        if ckpt is None:
+            reasons.append("checkpoint missing/invalid")
+        if not marker_commit_matches(info, commit):
+            reasons.append(f"marker commit {info.get('commit')!r} != pinned {commit!r}")
+        if not marker_matches_source(info, source):
+            reasons.append(
+                f"marker provenance (reused={info.get('reused')}, "
+                f"source={info.get('source')}) != stage1_source={source}"
             )
-        else:
-            log("stage1 marker points to a missing/invalid checkpoint, re-resolving stage1")
+        if source == "external" and ckpt is not None and ckpt != external:
+            reasons.append(f"marker ckpt {ckpt} != declared external {external}")
+        log(f"stage1 marker invalid ({'; '.join(reasons)}); re-resolving stage1")
         # The stage1 input may change: downstream results are no longer valid.
         marker.unlink(missing_ok=True)
         for downstream in (".stage2.done", ".backtest.done"):
             (run_dir / downstream).unlink(missing_ok=True)
 
+    if source == "external":
+        marker.write_text(f"best={external}\nsource=external\nreused=true\ncommit={commit}\n")
+        log(f"stage1 reused external checkpoint: {external}")
+        return external, {"mode": "reused", "source_id": "external", "ckpt": str(external)}
+
     if source != "self":
         ckpt = reuse_stage1_ckpt(repo, source, exp["id"])
-        marker.write_text(f"best={ckpt}\nsource={source}\nreused=true\n")
+        marker.write_text(f"best={ckpt}\nsource={source}\nreused=true\ncommit={commit}\n")
         log(f"stage1 reused from experiment {source}: {ckpt}")
         return ckpt, {"mode": "reused", "source_id": source, "ckpt": str(ckpt)}
 
@@ -385,25 +509,28 @@ def stage1(repo: Path, run_dir: Path, exp: dict):
     best = find_best_stage1_ckpt(run_dir, since=start)
     if best is None:
         raise StageError("stage1 finished but no best checkpoint found")
-    marker.write_text(f"best={best[1].name}\nval_loss={best[0]}\n")
+    marker.write_text(f"best={best[1].name}\nval_loss={best[0]}\ncommit={commit}\n")
     log(f"stage1 done: best={best[1].name} val_loss={best[0]:.4f}")
     return best[1], {"mode": "self", "source_id": None, "ckpt": str(best[1])}
 
 
-def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
+def stage2(repo: Path, run_dir: Path, ckpt: Path, commit: str = "") -> Path:
     marker = run_dir / ".stage2.done"
     res_subdir = find_stage2_outputs(run_dir)
     if marker.exists() and res_subdir is not None:
         # Only skip when the recorded stage2 run used exactly the current
-        # stage1 checkpoint (normalized absolute-path comparison).
+        # stage1 checkpoint (normalized absolute-path comparison), the fixed
+        # seed, and the current pinned commit.
         info = read_stage1_marker(marker)
         recorded = info.get("ckpt")
-        if recorded and _normalize_ckpt_ref(run_dir, recorded) == Path(ckpt).resolve():
+        ckpt_ok = bool(recorded) and _normalize_ckpt_ref(run_dir, recorded) == Path(ckpt).resolve()
+        seed_ok = info.get("seed") == str(STAGE2_SEED)
+        if ckpt_ok and seed_ok and marker_commit_matches(info, commit):
             log(f"stage2 already complete (res={res_subdir.name}), skipping")
             return res_subdir
         log(
-            f"stage2 marker ckpt ({recorded}) != current stage1 checkpoint "
-            f"({Path(ckpt).resolve()}); rerunning stage2"
+            f"stage2 marker stale (ckpt_ok={ckpt_ok}, seed_ok={seed_ok}, "
+            f"commit {info.get('commit')!r} vs pinned {commit!r}); rerunning stage2"
         )
     marker.unlink(missing_ok=True)
     (run_dir / ".backtest.done").unlink(missing_ok=True)
@@ -425,17 +552,27 @@ def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
     res_subdir = find_stage2_outputs(run_dir)
     if res_subdir is None:
         raise StageError("stage2 finished but prediction/metric artifacts not found")
-    marker.write_text(f"res={res_subdir.name}\nckpt={Path(ckpt).resolve()}\n")
+    marker.write_text(
+        f"res={res_subdir.name}\nckpt={Path(ckpt).resolve()}\n"
+        f"seed={STAGE2_SEED}\ncommit={commit}\n"
+    )
     log(f"stage2 done: res={res_subdir.name}")
     return res_subdir
 
 
-def backtest(repo: Path, run_dir: Path, res_subdir: Path, universe: str) -> Path:
+def backtest(repo: Path, run_dir: Path, res_subdir: Path, universe: str, commit: str = "") -> Path:
     marker = run_dir / ".backtest.done"
     metric_path = find_backtest_metric(res_subdir)
     if marker.exists() and metric_path is not None:
-        log(f"backtest already complete ({metric_path.parent.name}), skipping")
-        return metric_path
+        info = read_stage1_marker(marker)
+        if info.get("protocol") == backtest_protocol_sig(universe) and marker_commit_matches(info, commit):
+            log(f"backtest already complete ({metric_path.parent.name}), skipping")
+            return metric_path
+        log(
+            f"backtest marker stale (protocol {info.get('protocol')!r} vs "
+            f"{backtest_protocol_sig(universe)!r}, commit {info.get('commit')!r} vs "
+            f"pinned {commit!r}); rerunning backtest"
+        )
     marker.unlink(missing_ok=True)
     pred_path = res_subdir / f"{STAGE2_SEED}_best.pkl"
     run_with_retries(
@@ -450,7 +587,10 @@ def backtest(repo: Path, run_dir: Path, res_subdir: Path, universe: str) -> Path
     metric_path = find_backtest_metric(res_subdir)
     if metric_path is None:
         raise StageError("backtest finished but portfolio_metric.csv not found")
-    marker.write_text(f"metric={metric_path.relative_to(run_dir)}\n")
+    marker.write_text(
+        f"metric={metric_path.relative_to(run_dir)}\n"
+        f"protocol={backtest_protocol_sig(universe)}\ncommit={commit}\n"
+    )
     log(f"backtest done: {metric_path.parent.name}")
     return metric_path
 
@@ -489,19 +629,24 @@ def run_experiment(repo: Path, exp: dict, valid_ids) -> bool:
     set_queue_status(repo, exp_id, "running")
     commit_main(repo, f"Phase 2: start {exp_id}-{name} (running)")
     try:
+        commit = resolve_pinned_commit(repo, exp)
         source = str(exp.get("stage1_source") or "self")
-        if source != "self" and source not in valid_ids:
+        if source not in ("self", "external") and source not in valid_ids:
             raise StageError(f"stage1_source={source}: no such experiment in the queue")
-        checkout(repo, branch)
+        if source == "external":
+            # Fail fast before checking out / training anything.
+            external_stage1_ckpt(repo, exp)
+        checkout_experiment(repo, branch, commit)
         universe = read_branch_universe(repo)
+        exp = dict(exp, commit=commit)
         ckpt, stage1_prov = stage1(repo, run_dir, exp)
-        res_subdir = stage2(repo, run_dir, ckpt)
-        metric_path = backtest(repo, run_dir, res_subdir, universe)
+        res_subdir = stage2(repo, run_dir, ckpt, commit)
+        metric_path = backtest(repo, run_dir, res_subdir, universe, commit)
 
         metrics = read_metric_csv(res_subdir / f"{STAGE2_SEED}_metric.csv")
         port, bench = read_portfolio_metric_csv(metric_path)
         summary = {
-            "id": exp_id, "name": name, "branch": branch,
+            "id": exp_id, "name": name, "branch": branch, "commit": commit,
             "stage1_best_ckpt": ckpt.name,
             "stage1_source": stage1_prov,
             "res_dir": res_subdir.name,
@@ -512,14 +657,21 @@ def run_experiment(repo: Path, exp: dict, valid_ids) -> bool:
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
         result_text = build_result_text(metrics, port, bench)
         if stage1_prov["mode"] == "reused":
-            stage1_line = (
-                f"Stage 1 复用实验 {stage1_prov['source_id']} 的正式 checkpoint："
-                f"`{stage1_prov['ckpt']}`（本实验未重新训练 Stage 1）"
-            )
+            if stage1_prov["source_id"] == "external":
+                stage1_line = (
+                    f"Stage 1 复用外部 exact checkpoint："
+                    f"`{stage1_prov['ckpt']}`（本实验未重新训练 Stage 1）"
+                )
+            else:
+                stage1_line = (
+                    f"Stage 1 复用实验 {stage1_prov['source_id']} 的正式 checkpoint："
+                    f"`{stage1_prov['ckpt']}`（本实验未重新训练 Stage 1）"
+                )
         else:
             stage1_line = f"Stage 1 best checkpoint：`{ckpt.name}`（self-trained）"
         conclusion = (
-            f"Phase 2 固定执行器完成正式训练、预测与回测。"
+            f"Phase 2 固定执行器完成正式训练、预测与回测"
+            f"（pinned commit {commit}）。"
             f"{stage1_line}；"
             f"Stage 2 seed {STAGE2_SEED}。\n\n"
             f"产物：`artifacts/{exp_id}/run/`（checkpoints/、res/、"

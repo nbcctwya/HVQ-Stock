@@ -15,9 +15,10 @@ Phase 2 是**固定、确定性、可恢复的正式实验执行阶段**。
 Phase 2 对 queue 中每个符合条件的实验执行固定流程：
 
 1. 按 ID 顺序消费 `pending` 与 `running` 实验；
-2. checkout 对应 `exp/<ID>-<name>` 分支；
-3. Stage 1（或按 `stage1_source` 复用）→ Stage 2（seed 0）→
-   prediction / metrics → Qlib backtest；
+2. checkout queue 条目 pin 的 `commit`（detached HEAD）——不是实验分支的
+   最新 HEAD；分支在入队后即使发生变化也不影响已入队实验；
+3. Stage 1（或按 `stage1_source` 复用实验 / external exact checkpoint）→
+   Stage 2（seed 0）→ prediction / metrics → Qlib backtest；
 4. 收集 metrics（IC/ICIR/RankIC/RankICIR 与回测指标）；
 5. 回到 `main` 更新 `experiments/records/<ID>-<name>.md` 的
    Result / Conclusion；
@@ -30,6 +31,10 @@ Phase 2 对 queue 中每个符合条件的实验执行固定流程：
 
 实验进入 queue 意味着 Phase 1 已经完成：Idea、实验分支、代码实现、
 实验核心 config、单元测试、smoke test。Phase 2 原则上**只执行，不修改**。
+
+进入 queue 的实验是 immutable experiment：queue 条目（除 `status` 外）
+与其 pin 的代码版本一律不得修改；实验逻辑的任何变更都必须以新实验 ID
+重新走 Phase 1。
 
 Phase 2 禁止为了"把实验跑通"而擅自修改：
 
@@ -96,12 +101,21 @@ Hydra 命令构造错误、多个实验都会遇到的公共执行错误。
 
 - 正式产物统一在 `artifacts/<ID>/run/`，默认必须保留。
 - 阶段完成标记：`.stage1.done` / `.stage2.done` / `.backtest.done`。
+  marker 记录产生该阶段结果的精确 provenance：
+  - `.stage1.done`：exact checkpoint（`best`）、来源（self / 实验 ID /
+    external）、pinned `commit`；
+  - `.stage2.done`：使用的 Stage 1 checkpoint（`ckpt`）、`seed`、
+    pinned `commit`；
+  - `.backtest.done`：回测产物路径、`protocol` 签名（universe + 固定
+    回测参数 + seed）、pinned `commit`。
 - 一个已完成阶段只有在以下情况才允许重跑：
 
   - 输入发生变化（如 `stage1_source` 变更、Stage 1 checkpoint 变更）；
-  - marker 无效或与当前输入不一致；
+  - marker 的 provenance 与当前 queue 声明不一致（pinned commit、
+    Stage 1 来源、回测 protocol 任一不匹配即失效）；
   - artifact 缺失或损坏。
 
+  上一级失效必须级联失效其下游 marker（stage1 → stage2 → backtest）。
 - retry / resume 时不得随意删除已有有效结果。
 - 出错时日志与现场是诊断依据，优先保留，不做清理。
 

@@ -5,8 +5,16 @@
 
 ## 仓库所有权规则（最重要）
 
-- `main` 只负责保存 `experiments/queue.yaml` 和 `experiments/records/`
-  （以及本框架自身的模板文件）。`main` 上不出现任何实验性代码改动。
+- `main` 负责且只负责三类内容：
+  1. 实验元数据：`experiments/queue.yaml`、`experiments/records/`
+     （以及本框架自身的模板文件）；
+  2. 公共执行与测试基础设施：`experiments/runner.py`、公共回归测试
+     （`tests/test_runner.py`、`tests/test_backtest_mdd.py`、
+     `tests/test_protocol_metrics.py` 等）以及 corrected 执行协议代码
+     （如 `backtest_qlib.py` 的回测协议与 MDD 实现）；
+  3. 从上游 PRISM-VQ 继承的原始代码基线。
+- `main` 上不出现任何单个实验的实验性代码改动（模型结构、量化器、
+  融合方式等实验变量只能存在于 exp 分支）。
 - `main` 根目录的 `README.md` 永远保留原始 PRISM-VQ 的项目说明，
   不得在 `main` 上修改。
 - `exp/<ID>-<name>` 实验分支只保存该实验的代码改动，
@@ -18,6 +26,19 @@
   仍然只允许在 `main` 上修改。
 - 因此实验代码与实验元数据严格分离：代码（含分支 README）在 exp 分支，
   队列与记录永远只在 `main`。
+
+## Immutable experiment 原则
+
+**进入 queue 的实验 = immutable experiment。** 一个实验 ID 唯一对应：
+
+`代码版本（pinned commit）+ Stage 1 provenance + 固定执行协议 + 正式结果`
+
+- queue 条目的 `commit` 字段记录实验进入 queue 时的最终代码 commit
+  （完整 sha）。Phase 2 执行器只 checkout 该 pinned commit，
+  而不是实验分支的最新 HEAD。
+- 实验进入 queue 后，其代码与 queue 条目（除 `status` 外）一律不得再
+  修改。如果实验逻辑需要改变，必须创建新的实验 ID（新分支、新 record、
+  新 queue 条目），不得修改已有实验。
 
 ## 创建一个新实验的流程
 
@@ -82,21 +103,27 @@
 - `backtest_qlib.py` 已支持 `--pred_path` / `--output_dir`，
   回测产物跟随预测文件所在目录，无需额外改动。
 
-### 3.2 Stage 1 复用（stage1_source）
+### 3.2 Stage 1 provenance（stage1_source）
 
-- queue 条目支持可选字段 `stage1_source`，缺省视为 `self`
-  （本实验自己训练 Stage 1），保持向后兼容。
+- queue 条目通过 `stage1_source` 明确表达 Stage 1 的精确来源，三种形式：
+  - `self`（缺省）：本实验自己训练 Stage 1，保持向后兼容；
+  - `"<已有实验ID>"`：复用该实验已完成的正式 Stage 1 best checkpoint
+    （stage2-only 实验）；
+  - `external` + `stage1_ckpt: <path>`：复用 baseline / 外部的 exact
+    checkpoint（例如 PRISM-VQ 原始 Stage 1 checkpoint）。相对路径相对于
+    repo 根目录解析；文件必须存在且非空，否则执行器报错并将实验标记为
+    failed，绝不偷偷改为重新训练 Stage 1。
 - 只修改 Stage 2 的实验（例如只改预测头或融合方式、Stage 1 完全不变），
-  可以显式指定 `stage1_source: "<已有实验ID>"`，复用该实验已完成的正式
-  Stage 1 best checkpoint，保证 controlled experiment 并节省 GPU 时间。
-- 是否允许复用由创建实验的 AI 在第一阶段明确判断并写进 queue；
-  执行器不得自动推断或猜测 Stage 1 source。
-- 指定复用前必须确认 source 实验的 Stage 1 模型结构、量化器配置与数据
+  应显式复用 exact Stage 1 checkpoint，保证 controlled experiment 并
+  节省 GPU 时间。
+- 是否允许复用、复用哪一种来源，由创建实验的 AI 在第一阶段明确判断并
+  写进 queue；执行器不得自动推断或猜测 Stage 1 source。
+- 指定复用前必须确认 source 的 Stage 1 模型结构、量化器配置与数据
   划分和本实验完全一致（checkpoint 可以 strict 加载到本实验的 Stage 1
   模型）。
-- 执行器复用时从 `artifacts/<source_id>/run/.stage1.done` 读取精确的
-  Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并把实验标记为
-  failed，不允许偷偷改为重新训练 Stage 1。
+- 执行器复用 `"<ID>"` 来源时从 `artifacts/<source_id>/run/.stage1.done`
+  读取精确的 Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并
+  把实验标记为 failed，不允许偷偷改为重新训练 Stage 1。
 
 ### 4. 开发与验证（在实验分支上）
 
@@ -106,15 +133,19 @@
 
 ### 5. 收尾（严格按顺序执行）
 
-1. 在实验分支上 commit 实验代码（仅代码改动）。
+1. 在实验分支上 commit 实验代码（仅代码改动）。**这是该实验的最终
+   代码版本；其完整 commit sha 将被 pin 进 queue，之后不得再修改。**
 2. 切回 `main`。
 3. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
    Modification、Constraints、Git（Base 填创建分支所用的 base，
-   Branch 填 exp 分支名，Commit 填实验分支上的代码 commit hash）、
+   Branch 填 exp 分支名，Commit 填实验分支上的最终代码 commit hash）、
    Smoke Test。Result 保持 `Status: PENDING`，Conclusion 留空。
 4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
-   （按 id 顺序，追加到末尾），初始状态必须为 `pending`。
+   （按 id 顺序，追加到末尾），初始状态必须为 `pending`，并且必须填写
+   `commit` 字段（与 record 中 Git Commit 一致的完整 sha；执行器只执行
+   该 pinned commit，而不是分支最新 HEAD）。需要复用 Stage 1 时同时填写
+   `stage1_source`（以及 external 形式下的 `stage1_ckpt`）。
 5. 在 `main` 上 commit record + queue 的变更。
 
 ### 6. 边界
@@ -132,7 +163,8 @@
   `.stage1.done` / `.stage2.done` / `.backtest.done` marker 自动续跑，
   不得因此清空 artifact 或从头执行。`done` 永远跳过；`failed` 只有在
   显式指定（`--only <ID>`）时才允许重试。
-- 执行时切到对应的 exp 分支，完成后回到 `main` 更新元数据。
+- 执行时 checkout queue 条目 pin 的 `commit`（detached HEAD），而不是
+  实验分支的最新 HEAD；完成后回到 `main` 更新元数据。
 - 执行器负责在 `main` 上补充记录中的 Result 部分，并将 queue
   状态更新为 `done` 或 `failed`；必要时填写 Conclusion。
 - 执行器不创建新实验、不修改实验代码、不改动 ID 与命名。

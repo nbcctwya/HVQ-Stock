@@ -54,6 +54,11 @@ Branch: exp/002-prior-gated-fusion
 Commit: 1d16627（ac5d1f6 初版 gated fusion；2752a2f 修正为 2 倍缩放 +
 gate 显式零初始化，初始输出与原固定融合严格等价；632365c 引入
 artifact_root 产物隔离；1d16627 分支 README 补充 artifact_root 用法）
+Queue pinned commit: 726836e19d2ceaed1863b5e17732e364ecb64574
+（实验代码 1d16627 + 公共 correctness fix 726836e；Phase 2 只执行该 pinned commit）
+Stage 1 provenance: external（queue `stage1_source: external`，
+`stage1_ckpt: ../PRISM-VQ/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt`，
+即 corrected baseline 的 exact Stage 1 checkpoint）
 
 ## Smoke Test
 

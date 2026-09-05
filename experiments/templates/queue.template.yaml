@@ -13,6 +13,10 @@
 #             experiment, use that experiment's branch, e.g.
 #             "exp/001-hvq-residual-2level". Never infer this.
 #   branch  : always "exp/<id>-<name>", e.g. exp/004-market-gated-z1.
+#   commit  : full sha of the experiment branch's final code commit,
+#             recorded when the experiment enters the queue. Phase 2
+#             executes exactly this pinned commit (detached HEAD), never
+#             the branch's latest HEAD. Required.
 #   status  : exactly one of:
 #               pending  - code complete, smoke PASS, ready for training
 #               running  - being executed by the stage-2 executor
@@ -21,17 +25,25 @@
 #   stage1_source (optional, default "self"):
 #             "self" trains stage1 normally. An existing experiment id
 #             (e.g. "001") reuses that experiment's formal stage1 best
-#             checkpoint (stage2-only experiments). Declared explicitly
-#             by the experiment author after verifying checkpoint
-#             compatibility; never inferred by the executor.
+#             checkpoint (stage2-only experiments). "external" reuses an
+#             exact baseline/external checkpoint and requires stage1_ckpt.
+#             Declared explicitly by the experiment author after verifying
+#             checkpoint compatibility; never inferred by the executor.
+#   stage1_ckpt (required iff stage1_source: external):
+#             path to the exact external/baseline stage1 checkpoint;
+#             relative paths resolve against the repo root. The file must
+#             exist and be non-empty, otherwise the experiment fails loudly
+#             (the executor never silently retrains stage1).
 #
 # Ordering: entries are sorted by id ascending.
 # Mutation: append-only for new experiments; only `status` may be
-# updated on existing entries.
+# updated on existing entries. A queued experiment is immutable — if the
+# experiment logic changes, create a new experiment id.
 
 experiments:
   - id: "001"
     name: example-entry
     base: main
     branch: exp/001-example-entry
+    commit: 0000000000000000000000000000000000000000
     status: pending

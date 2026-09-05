@@ -7,30 +7,49 @@
 #     complete and its smoke test has PASSED.
 #   - New entries always start with status: pending.
 #   - status is one of: pending | running | done | failed
+#   - A queued experiment is IMMUTABLE: once an entry is in the queue, only
+#     its `status` may ever change. If the experiment logic changes, create a
+#     new experiment id instead of modifying the entry or its branch.
 #
 # Entry format:
 #   - id: "004"                          # three-digit string
 #     name: market-gated-z1              # kebab-case
 #     base: main                         # base branch (default main)
 #     branch: exp/004-market-gated-z1
+#     commit: <full sha>                 # pinned experiment commit; Phase 2
+#                                        # executes exactly this commit,
+#                                        # never the branch's latest HEAD
 #     status: pending
-#     stage1_source: self                # optional; an experiment id reuses
-#                                        # that experiment's stage1 checkpoint
+#     stage1_source: self                # optional; self | "<experiment id>"
+#                                        # | external
+#     stage1_ckpt: ../PRISM-VQ/checkpoints/xxx.ckpt
+#                                        # required iff stage1_source: external;
+#                                        # relative paths resolve against the
+#                                        # repo root
 
 experiments:
   - id: "001"
     name: hvq-residual-2level
     base: main
     branch: exp/001-hvq-residual-2level
+    commit: ea11ab39cadaffcd0ee9d2d9ba0a94429113de82
     status: done
+    stage1_source: self
   - id: "002"
     name: prior-gated-fusion
     base: main
     branch: exp/002-prior-gated-fusion
+    commit: 726836e19d2ceaed1863b5e17732e364ecb64574
     status: done
+    stage1_source: external
+    # Corrected-baseline exact Stage 1 (PRISM-VQ original single-VQ512,
+    # seed 42); the controlled fixed-vs-gated comparison shares this
+    # checkpoint with the baseline.
+    stage1_ckpt: ../PRISM-VQ/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
   - id: "003"
     name: hvq-z0-only
     base: exp/001-hvq-residual-2level
     branch: exp/003-hvq-z0-only
+    commit: b84ba53d7af54adb35c42974b96ab81ea826feec
     status: done
     stage1_source: "001"

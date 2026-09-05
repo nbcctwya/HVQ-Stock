@@ -46,6 +46,9 @@
 Base: exp/001-hvq-residual-2level
 Branch: exp/003-hvq-z0-only
 Commit: 057a722
+Queue pinned commit: b84ba53d7af54adb35c42974b96ab81ea826feec
+（实验代码 057a722 + 公共 correctness fix b84ba53；Phase 2 只执行该 pinned commit）
+Stage 1 provenance: 复用实验 001 的 exact Stage 1（queue `stage1_source: "001"`）
 
 ## Smoke Test
 
