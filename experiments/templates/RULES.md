@@ -136,3 +136,5 @@
 - 执行器负责在 `main` 上补充记录中的 Result 部分，并将 queue
   状态更新为 `done` 或 `failed`；必要时填写 Conclusion。
 - 执行器不创建新实验、不修改实验代码、不改动 ID 与命名。
+- Phase 2 的完整执行规范（职责、错误分类、batch 行为、resume 原则、
+  汇报要求）见 `experiments/PHASE2_RULES.md`。
