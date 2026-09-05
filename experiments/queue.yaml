@@ -77,5 +77,5 @@ experiments:
     base: exp/003-hvq-z0-only
     branch: exp/006-hvq-predictive-residual-z1
     commit: b2af82df73f63d9387681876017d5fd9e7e678f7
-    status: pending
+    status: running
     stage1_source: "001"
