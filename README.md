@@ -1,137 +1,140 @@
-# exp/001 — hvq-residual-2level
+# exp/004 — hvq-learnable-z1-scale
 
-- Base: `main`（原始 PRISM-VQ）
-- Branch: `exp/001-hvq-residual-2level`
+- Base: `exp/001-hvq-residual-2level`
+- Branch: `exp/004-hvq-learnable-z1-scale`
 
 ## Idea / Motivation
 
-在 PRISM-VQ 基础上引入残差式层次化向量量化（Residual HVQ），用 2 级
-codebook（256 + 256）替代单层 512 codebook，验证残差式 2 级 VQ 能否在
-保持 IC 的同时改善码本利用与训练稳定性。
+001 的 Stage 2 固定使用两级融合 `z = z0 + z1`（等价于 α=1）；003 的
+z0-only 消融等价于 α=0。003 在 RankIC、Sharpe、MDD 上并未弱于 001，
+说明第二级残差表示 z1 可能并非完全无用，而是以固定权重 1 注入 Stage 2 时
+贡献过强、混入了更多 reconstruction/detail 信息或噪声。
 
-# HVQ-Stock
+本实验为第二级残差量化表示 z1 引入一个**全局可学习缩放系数 α**，让模型
+自行学习 z1 的最优贡献强度，以判断：
 
-层次化向量量化（Hierarchical VQ / Residual VQ）股票预测实验仓库。代码以
-[PRISM-VQ](../PRISM-VQ)（IJCAI-ECAI 2026）为底，在其两阶段框架上将 Stage 1 的
-单层 `VectorQuantiser` 扩展为**残差式多级量化器 `ResidualVectorQuantiser`**，
-用于对比离散表示容量对收益预测的影响。实验市场：CSI300。
+1. 最优 α 是否趋近于 0（z1 对收益预测整体价值有限）；
+2. 最优 α 是否稳定落在 0 与 1 之间（z1 有增量预测价值，但需降低注入强度）；
+3. learnable α 能否在 001（α=1）与 003（α=0）之间取得更好的预测或
+   投资组合表现。
 
-## 与上游 PRISM-VQ 的关系
+## 融合定义
 
-- 全部训练/评估代码拷贝自 `../PRISM-VQ`，仅做最小改动（见下文"改动点"）。
-- 量化器接口保持兼容：`forward(h_batch)` 输入 `(N_t, 128)`，返回
-  `(z_q, vq_loss, (perplexity, min_encodings, encoding_indices))`，z_q 走 STE。
-- 本实验分支的默认配置即为 `vqvae.quantizer.type: 'hvq'`（实验本身，
-  直接运行默认配置即可）；手动改为 `'single'` 可回退到与上游完全一致的行为。
-- 不复制上游的大制品：数据集（`dataset/data/`，9GB）、checkpoints、结果文件。
-  预处理 pickle 默认直接读取 `../PRISM-VQ/dataset/data`（见"数据路径配置"）。
+Stage 2 中原本固定使用的两级融合：
 
-## 目录结构
-
-```text
-stage1.py               Stage 1：训练 VQ-VAE 表征模型（固定 seed 42）
-stage2.py               Stage 2：加载 Stage 1 checkpoint，训练收益预测模型
-module/
-  quantise.py           上游单层 VectorQuantiser（未改动）
-  quantise_hvq.py       新增：ResidualVectorQuantiser + create_quantizer 工厂
-  autoencoder.py        VQVAE（量化器实例化改为走 create_quantizer）
-trainer/
-  train_vqvae.py        Stage 1 Lightning 模块
-  train_ypred.py        Stage 2 Lightning 模块（工厂分支 + codebook 冻结修复）
-  train_ypred_*.py      上游消融变体（未改动，不支持 hvq 开关）
-configs/config.yaml     全部实验配置
-dataset/                数据预处理脚本与 universe 配置（不含 data/）
-tests/                  单元测试
-scripts/ utils/         上游工具脚本
+```
+z = z0 + z1
 ```
 
-## 残差式层次化量化器（HVQ）
+修改为：
 
-`module/quantise_hvq.py::ResidualVectorQuantiser` 用 `nn.ModuleList` 堆叠
-`num_levels` 个上游 `VectorQuantiser`：
-
-- 第 0 级量化编码器输出 `h`；第 l 级量化前级残差 `r = h - sum(z_q_j)`。
-- 最终 `z_q = sum(z_q_l)`，整体 STE：`z_q_output = h + (z_q - h).detach()`。
-- 总 vq_loss 为各级 loss 之和（各级内部已含 beta commitment + codebook loss；
-  `contras_loss` 逐层按各自残差计算）。
-- 每一级有独立的 codebook 与 FeaturePool，dead-code 重初始化逻辑（training mode
-  下自动生效）逐层独立保留。
-- 返回签名与单层一致，但 perplexity / encodings / indices 为长度为
-  `num_levels` 的按级 list（Stage 2 forward 只用 z_q，不受影响；Stage 1 的
-  codebook 利用率统计取第 0 级）。
-
-## 配置开关
-
-`configs/config.yaml`：
-
-```yaml
-vqvae:
-  quantizer:
-    type: 'hvq'               # 本实验默认即为 'hvq'；'single' 为上游原行为
-    num_levels: 2             # hvq 量化级数
-    level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
+```
+z = z0 + α · z1
 ```
 
-Stage 1 与 Stage 2 通过同一个 `create_quantizer` 工厂实例化量化器，两阶段共用
-一份 config 即可保证 checkpoint 参数命名（`quantizer.` / `quantizer.levels.*`）
-严格匹配。
+其中 z0 / z1 的生成方式与 001 完全一致（同一残差链：第 0 级量化 h，
+第 1 级量化残差 h − z0），仅融合权重由固定 1 变为可学习 α。
 
-## 数据路径配置
+## α 的参数化与初始化
 
-预处理 pickle 目录优先读 `data.pickle_dir`（默认 `../PRISM-VQ/dataset/data`，
-即复用 PRISM-VQ 已生成的数据），缺省回退 `data.data_path`；文件名拼接逻辑不变
-（`<universe>_<window>_h<pred_len>_dl2_{train,valid,test}.pkl`，位于
-`<pickle_dir>/<region>/` 下）。如需自行生成数据，用 `dataset/get_dataset.py`
-生成后修改 `data.pickle_dir` 指向即可。
+- α 为**单个全局可学习标量**（非 per-stock / per-date / per-sample /
+  market-conditioned，无任何 gate 网络），通过 sigmoid 约束到 [0, 1]：
+
+  ```
+  α = sigmoid(a)
+  ```
+
+  `a`（代码中 `GenerateReturn.z1_scale_raw`）是 `nn.Parameter`，属于
+  Stage 2 可训练参数，随 Stage 2 一起由 AdamW 优化（与其他 Stage 2 参数
+  同一优化器、同一学习率协议，不引入新的超参数）。
+- z0 / z1 沿用 Stage 1 惯例 `detach()`（Stage 1 全冻结），**α 不 detach**，
+  保证 `a` 能从 Stage 2 损失获得梯度。
+- 初始化：`a_init = 3.0`，即 **α_init = sigmoid(3.0) ≈ 0.9526**。
+  设计理由：起点尽可能接近 base 001 的 α=1 行为，同时 sigmoid 在 a=3 处
+  未饱和（σ′(3) ≈ 0.045），梯度仍可正常流动；不通过初始化引入额外实验
+  变量（单一的、明确的、可复现的标量初值）。
+
+## 核心修改（相对 base 001）
+
+- `module/quantise_hvq.py::ResidualVectorQuantiser` 新增
+  `forward_per_level(h_batch)`：按与 `forward` 完全相同的残差链运行各级
+  量化，返回按级的量化输出 list（`sum(z_q_levels)` 数值上等于
+  `forward` 的 z0+z1）；默认 `forward` 行为不变，Stage 1 不受影响。
+- `trainer/train_ypred.py::GenerateReturn`：
+  - 新增配置 `predictor.learnable_z1_scale`（代码默认 False 保持 001 行为；
+    本分支默认配置为 true）与 `predictor.z1_scale_init`（a 的初值，默认 3.0）；
+    开启时要求两级 hvq 量化器，否则报错；
+  - 新增 `nn.Parameter z1_scale_raw`（α = sigmoid(z1_scale_raw)）；
+  - forward 中融合改为 `z_q = z0.detach() + α · z1.detach()`；
+  - 训练过程记录 `z1_alpha`（每个 train step 的 wandb 指标）、
+    `Best_Val_z1_alpha`（best checkpoint 对应 epoch 的 α），并在训练结束
+    时打印最终 α；α 作为模型参数随 checkpoint 保存/加载。
+- `stage2.py`：加载 best checkpoint 后打印其对应的 α（Best checkpoint
+  z1_alpha），仅报告用途，不影响训练逻辑。
+- `configs/config.yaml`：`predictor.learnable_z1_scale: true`、
+  `predictor.z1_scale_init: 3.0`——默认配置即 004 实验本身，无需实验特有
+  CLI override；Stage 2 `train.seed: 0` 不变。
+- 新增 `tests/test_learnable_z1_scale.py`（12 个用例）。
+
+## 与 base 001 的唯一区别
+
+唯一实验变量：Stage 2 两级融合由固定 `z0 + z1` 改为 `z0 + α·z1`
+（α = sigmoid(a)，全局可学习标量）。模型结构、Stage 1、两级 VQ 配置
+（hvq, num_levels=2, level_num_embed=[256,256]）、Stage 2 网络、损失函数、
+优化器、数据处理及全部训练/回测配置均与 001 一致。
+
+对照关系：base 001 等价于固定 α=1；003（hvq-z0-only）等价于下游使用层面的
+α=0；本实验学习 α∈[0,1]。
+
+## Stage 1 复用关系
+
+- `stage1_source: "001"`：复用实验 001 的正式 Stage 1 best checkpoint
+  （`hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`），本实验不重新训练
+  Stage 1。
+- Stage 1 结构、量化器配置、数据划分与 001 完全一致；`forward_per_level`
+  只新增读取接口、不改动任何 Stage 1 参数命名，001 checkpoint 以
+  **strict** 方式加载（encoder/quantizer/revin 均 missing=0 /
+  unexpected=0，已实证）。
+- Stage 1 在 Stage 2 中保持完全冻结（encoder/quantizer/revin
+  requires_grad=False 且强制 eval，与 001 相同）。
+
+## α 的读取位置（Phase 2 正式运行后）
+
+- best checkpoint 的 `state_dict['z1_scale_raw']`：α = sigmoid(z1_scale_raw)；
+- 控制台日志：`== learnable z1 scale enabled: ... alpha_init=... ==`（初始值）、
+  `========== Best checkpoint z1_alpha: ... ==========` 与
+  `========== Final learned z1_alpha: ... ==========`（训练结束）；
+- wandb 指标 `z1_alpha`（逐步轨迹）与 `Best_Val_z1_alpha`（best epoch 的 α）。
 
 ## 运行
 
-默认配置即为本实验（HVQ），无需额外 override 启用核心改动：
+默认配置即为本实验，无需额外 override 启用核心改动：
 
 ```bash
-# Stage 1（HVQ）
-conda run -n prism-vq python stage1.py data.universe=csi300
-
-# Stage 2：configs/config.yaml 的 stage2_presets.csi300.predictor.saved_model
-# 已填入本实验 Stage 1 checkpoint；直接运行：
-conda run -n prism-vq python stage2.py data.universe=csi300
+# Stage 2（Stage 1 复用 001，checkpoint 由执行器放入 artifact_root/checkpoints）
+conda run -n prism-vq python stage2.py data.universe=csi300 \
+    artifact_root=artifacts/004/run
 ```
 
-CLI override 仅用于统一执行层参数，例如：
-
-```bash
-# 多 seed sweep
-python stage2.py -m data.universe=csi300 train.seed=0,1,2,3,4
-
-# artifact 隔离：checkpoints/res 落到 artifacts/001/run/ 下，
-# Stage 2 也会从该目录加载 Stage 1 checkpoint
-python stage2.py data.universe=csi300 artifact_root=artifacts/001/run
-```
+CLI override 仅用于统一执行层参数（`train.seed`、`train.num_epochs`、
+`artifact_root` 等）。
 
 ## 单元测试
 
 ```bash
-conda run -n prism-vq python -m unittest tests.test_hvq -v
+conda run -n prism-vq python -m unittest tests.test_learnable_z1_scale -v
+# 回归：tests.test_hvq、tests.test_protocol_metrics
 ```
-
-## 改动点（相对上游 PRISM-VQ）
-
-- 新增 `module/quantise_hvq.py`：`ResidualVectorQuantiser` 与 `create_quantizer`。
-- `module/autoencoder.py`、`trainer/train_ypred.py`：量化器实例化改为工厂分支。
-- `trainer/train_vqvae.py`：codebook 利用率统计兼容 hvq 的按级 indices list（取第 0 级）。
-- `trainer/train_ypred.py::GenerateReturn`：覆写 `train()`，强制 quantizer 保持 eval，
-  修复 Lightning 递归 `.train()` 导致已冻结 codebook 在 training mode 下被 `.data`
-  改写（dead-code 重初始化）的漏洞。
-- `stage1.py` / `stage2.py`：pickle 目录支持 `data.pickle_dir`。
-- `configs/config.yaml`：新增 quantizer `type` / `num_levels` / `level_num_embed`、
-  `data.pickle_dir`；`stage2_presets` 的 `saved_model` 置空待训练后填写。
-- 新增 `tests/test_hvq.py`。
 
 ## Smoke 状态
 
-PASS — Stage 1（HVQ，1 epoch smoke 及完整训练均跑通）与 Stage 2
-（seed 0）全流程验证通过；详见 `main` 分支
-`experiments/records/001-hvq-residual-2level.md`。
+PASS — 单元测试 12/12（`tests.test_learnable_z1_scale`）+ 14/14
+（`tests.test_hvq`、`tests.test_protocol_metrics` 回归）通过；001 Stage 1
+checkpoint strict 加载验证（missing=0/unexpected=0）、融合数值一致性
+（z_q == z0 + α·z1，max diff 0）、α 梯度与更新、Stage 1 冻结均实证通过；
+Stage 2 smoke（1 epoch, seed 0, artifact_root=artifacts/004/smoke）全流程
+跑通，日志中可读取 α 初始值与训练后值。详见 `main` 分支
+`experiments/records/004-hvq-learnable-z1-scale.md`。
 
 ---
 

@@ -389,6 +389,10 @@ def train(cfg: DictConfig,
     best_model = GenerateReturn.load_from_checkpoint(best_path, config=model_config, T_max=T_max)
     best_model.freeze_vqvae()
     best_model.eval()
+    if getattr(best_model, 'learnable_z1_scale', False):
+        best_alpha = torch.sigmoid(best_model.z1_scale_raw).item()
+        print(f"========== Best checkpoint z1_alpha: {best_alpha:.6f} "
+              f"(z1_scale_raw={best_model.z1_scale_raw.item():.6f}) ==========")
 
     with torch.no_grad():
         print("========== Validation evaluation ==========")

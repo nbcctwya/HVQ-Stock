@@ -73,6 +73,32 @@ class ResidualVectorQuantiser(nn.Module):
 
         return z_q_output, total_loss, (perplexities, min_encodings_list, indices_list)
 
+    def forward_per_level(self, h_batch):
+        """按与 forward 完全相同的残差链运行各级量化，返回按级的量化输出。
+
+        返回 (z_q_levels, total_loss, (perplexities, min_encodings_list, indices_list))，
+        其中 z_q_levels 是长度为 num_levels 的 list，z_q_levels[l] 为第 l 级的
+        量化输出（各级 VectorQuantiser 内部 STE 保证梯度可回传到 h_batch）。
+        z_q_levels 满足 sum(z_q_levels) 在数值上等于 forward(h_batch) 的 z_q。
+        用于 learnable-z1-scale 实验：Stage 2 自行按 z0 + alpha * z1 融合，
+        不改变 forward 的默认 z0 + z1 行为。
+        """
+        residual = h_batch
+        z_q_levels = []
+        total_loss = 0.0
+        perplexities, min_encodings_list, indices_list = [], [], []
+
+        for level in self.levels:
+            z_q_l, loss_l, (perplexity_l, min_encodings_l, encoding_indices_l) = level(residual)
+            residual = residual - z_q_l.detach()
+            z_q_levels.append(z_q_l)
+            total_loss = total_loss + loss_l
+            perplexities.append(perplexity_l)
+            min_encodings_list.append(min_encodings_l)
+            indices_list.append(encoding_indices_l)
+
+        return z_q_levels, total_loss, (perplexities, min_encodings_list, indices_list)
+
 
 def create_quantizer(vqvae_cfg):
     """

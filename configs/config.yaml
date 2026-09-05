@@ -21,7 +21,7 @@ vqvae:
 
   quantizer:
     # type: 'single' 保持 PRISM-VQ 原行为；'hvq' 启用残差式层次化量化（ResidualVectorQuantiser）
-    # 本实验（001）默认即为 'hvq'，直接运行默认配置就是该实验本身。
+    # 本实验（004，基于 001）Stage 1 保持与 001 相同的两级 'hvq' 训练方式。
     type: 'hvq'
     num_levels: 2
     level_num_embed: [256, 256]  # 各级 codebook 大小，长度须等于 num_levels
@@ -102,6 +102,13 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  # 004 实验核心开关：Stage 2 两级融合由固定 z0 + z1 改为 z0 + alpha * z1，
+  # alpha = sigmoid(z1_scale_raw) 为全局可学习标量（单个参数，约束到 [0,1]）。
+  # 默认 true 即本实验本身；设为 false 回退到 001 的 z0+z1 固定融合行为。
+  learnable_z1_scale: true
+  # sigmoid 前的原始参数 a 的初始值：sigmoid(3.0) ≈ 0.9526，
+  # 起点接近 base 001 的 alpha=1 行为，同时 sigmoid 未饱和、梯度仍可流动。
+  z1_scale_init: 3.0
   
 train:
   seed: 0 # 

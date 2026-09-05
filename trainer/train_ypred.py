@@ -12,7 +12,7 @@ from module.bidirectional import LoadingGenerator
 from utils import get_root_dir, calc_ic
 from utils.rankloss import RankLoss
 from module.quantise import VectorQuantiser
-from module.quantise_hvq import create_quantizer
+from module.quantise_hvq import ResidualVectorQuantiser, create_quantizer
 from module.layers.encoder import SpatialEncoder
 from module.layers.decoder import ReconstructionDecoder
 from module.layers.src import RevIN
@@ -85,6 +85,21 @@ class GenerateReturn(pl.LightningModule):
 
         # 2. Vector Quantizer（按 quantizer.type 选择单层或残差式 HVQ）
         self.quantizer = create_quantizer(vqvae_cfg)
+
+        # 004 实验核心：Stage 2 两级融合由固定 z0 + z1 改为 z0 + alpha * z1，
+        # alpha = sigmoid(z1_scale_raw) 为全局可学习标量（单个参数，约束到 [0,1]）。
+        # 默认 False 保持 001 的 z0+z1 行为；本实验分支默认配置即为 True。
+        self.learnable_z1_scale = config['predictor'].get('learnable_z1_scale', False)
+        if self.learnable_z1_scale:
+            if not isinstance(self.quantizer, ResidualVectorQuantiser) or self.quantizer.num_levels != 2:
+                raise ValueError(
+                    "predictor.learnable_z1_scale=True 需要两级 hvq 量化器 "
+                    "(ResidualVectorQuantiser, num_levels=2)"
+                )
+            z1_scale_init = float(config['predictor'].get('z1_scale_init', 3.0))
+            self.z1_scale_raw = nn.Parameter(torch.tensor(z1_scale_init))
+            print(f"== learnable z1 scale enabled: a_init={z1_scale_init}, "
+                  f"alpha_init=sigmoid(a)={torch.sigmoid(self.z1_scale_raw).item():.6f} ==")
         
         # 3. RevIN
         self.revin = RevIN(self.num_features)
@@ -170,8 +185,16 @@ class GenerateReturn(pl.LightningModule):
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
-        z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
-        z_q = z_q.detach()
+        if self.learnable_z1_scale:
+            # z = z0 + alpha * z1，alpha = sigmoid(z1_scale_raw) ∈ [0,1] 可学习。
+            # z0/z1 按 Stage 1 惯例 detach（Stage 1 全冻结），alpha 不 detach，
+            # 保证 z1_scale_raw 能从 Stage 2 损失获得梯度。
+            z_q_levels, _, (_, min_encodings, vq_idx) = self.quantizer.forward_per_level(h_batch)
+            alpha = torch.sigmoid(self.z1_scale_raw)
+            z_q = z_q_levels[0].detach() + alpha * z_q_levels[1].detach()
+        else:
+            z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
+            z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
         alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
@@ -203,6 +226,10 @@ class GenerateReturn(pl.LightningModule):
         self.log('train_mse_loss', mse_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # self.log('train_rank_loss', rank_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+        if self.learnable_z1_scale:
+            # 全程记录学习中的 alpha，便于事后还原 alpha 轨迹
+            self.log('z1_alpha', torch.sigmoid(self.z1_scale_raw),
+                     on_step=True, on_epoch=True, logger=True, sync_dist=True)
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
@@ -253,9 +280,19 @@ class GenerateReturn(pl.LightningModule):
                 'Best_Val_RIC': current_ric,
                 'Best_Val_RICIR': current_ricir,
             }
+            if self.learnable_z1_scale:
+                # 记录 best checkpoint 对应的 alpha（该 checkpoint 保存于本 epoch）
+                self.best_metrics_at_min_loss['Best_Val_z1_alpha'] = \
+                    float(torch.sigmoid(self.z1_scale_raw))
             self.log_dict(self.best_metrics_at_min_loss, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         if val_loss_epoch is not None:
             self.log('val_loss_epoch', val_loss_epoch, on_step=False, on_epoch=True, logger=True, sync_dist=True)
+
+    def on_train_end(self):
+        if self.learnable_z1_scale:
+            print(f"========== Final learned z1_alpha: "
+                  f"sigmoid({self.z1_scale_raw.item():.6f}) = "
+                  f"{torch.sigmoid(self.z1_scale_raw).item():.6f} ==========")
 
 
     def init_from_ckpt(self, path, ignore_keys=list()):
