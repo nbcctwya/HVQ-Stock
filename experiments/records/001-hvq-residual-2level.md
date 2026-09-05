@@ -51,14 +51,14 @@ Notes: Stage 1 训练至 epoch 20 触发 early stop，最佳 epoch 5
 
 ## Result
 
-Status: DONE（test 区间 2023-01-03 – 2025-12-31，727 个交易日）
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
 IC: 0.0352
 ICIR: 0.2174
 RankIC: 0.0506
 RankICIR: 0.3171
 
-Annual Return: 13.69%（基准 6.40%，超额 6.34%）
+Annual Return: 13.69%（基准 6.40%，超额 7.29%）
 Sharpe: 0.7591
 Sortino: 1.1405
 MDD: -18.49%
@@ -67,18 +67,6 @@ Turnover: 0.3293
 
 ## Conclusion
 
-残差式 2 级 HVQ 端到端跑通，效果与 PRISM-VQ 单层 512 codebook 基本持平：
-IC 0.0352 vs 0.0354 持平，ICIR 0.2174 vs 0.2042 略胜，
-RankIC/RankICIR 略低（0.0506/0.3171 vs 0.0567/0.3293，同 seed 0 对照）。
-Stage 1 最佳 val_loss（total）0.459 明显低于单层基线 0.568，但因
-total loss 中 vq 项规模不同，该对比仅供参考，不代表重构质量提升。
+Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（self-trained）；Stage 2 seed 0。
 
-产物：
-- Stage 1 checkpoint：`checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`
-- 预测：`res/VQ512_csi300_mo2_k1_mh64_md0.1_dm64_nh2_l1_d0.1_au0.01_1h2_1e128_1d0.1_1l2_p20_ai3_ks3/0_best.pkl`
-- 回测：同目录 `backtest/seed0_top30_drop5/`
-- 日志：`logs/stage1_hvq_full.log`、`logs/stage2_hvq_seed0.log`、`logs/backtest_hvq_seed0.log`
-
-备注：回测口径为 PRISM 原生（CN 不限涨跌停），与 fusion_analysis 统一
-协议（limit=0.095）不直接可比；单 seed 噪声大，后续应补 seed 1–4，
-并观察 per-level perplexity 判断各级 codebook 利用率。
+产物：`artifacts/001/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。

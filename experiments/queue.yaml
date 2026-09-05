@@ -22,7 +22,7 @@ experiments:
     name: hvq-residual-2level
     base: main
     branch: exp/001-hvq-residual-2level
-    status: running
+    status: done
   - id: "002"
     name: prior-gated-fusion
     base: main
