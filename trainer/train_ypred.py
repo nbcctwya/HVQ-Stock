@@ -86,20 +86,28 @@ class GenerateReturn(pl.LightningModule):
         # 2. Vector Quantizer（按 quantizer.type 选择单层或残差式 HVQ）
         self.quantizer = create_quantizer(vqvae_cfg)
 
-        # 004 实验核心：Stage 2 两级融合由固定 z0 + z1 改为 z0 + alpha * z1，
-        # alpha = sigmoid(z1_scale_raw) 为全局可学习标量（单个参数，约束到 [0,1]）。
+        # 005 实验核心：Stage 2 两级融合由 004 的全局单标量 alpha 改为
+        # sample-wise adaptive z1 gate：
+        #   z_i = z0_i + g_i * z1_i，g_i = sigmoid(Linear(concat(z0_i, z1_i)))
+        # g_i 为每个样本独立的标量，约束到 [0,1]。gate 输入仅使用 Stage 1 已
+        # 产生的 z0/z1（detach），不引入任何额外信息。Linear 输出维度为 1，
+        # weight 全零初始化、bias 初始化为 3.0，因此所有样本初始
+        # g_i = sigmoid(3.0) ≈ 0.9526，与 004 的 alpha_init 完全一致。
         # 默认 False 保持 001 的 z0+z1 行为；本实验分支默认配置即为 True。
-        self.learnable_z1_scale = config['predictor'].get('learnable_z1_scale', False)
-        if self.learnable_z1_scale:
+        self.samplewise_z1_gate = config['predictor'].get('samplewise_z1_gate', False)
+        if self.samplewise_z1_gate:
             if not isinstance(self.quantizer, ResidualVectorQuantiser) or self.quantizer.num_levels != 2:
                 raise ValueError(
-                    "predictor.learnable_z1_scale=True 需要两级 hvq 量化器 "
+                    "predictor.samplewise_z1_gate=True 需要两级 hvq 量化器 "
                     "(ResidualVectorQuantiser, num_levels=2)"
                 )
-            z1_scale_init = float(config['predictor'].get('z1_scale_init', 3.0))
-            self.z1_scale_raw = nn.Parameter(torch.tensor(z1_scale_init))
-            print(f"== learnable z1 scale enabled: a_init={z1_scale_init}, "
-                  f"alpha_init=sigmoid(a)={torch.sigmoid(self.z1_scale_raw).item():.6f} ==")
+            z1_gate_bias_init = float(config['predictor'].get('z1_gate_bias_init', 3.0))
+            self.z1_gate = nn.Linear(2 * self.vq_embed_dim, 1)
+            nn.init.zeros_(self.z1_gate.weight)
+            nn.init.constant_(self.z1_gate.bias, z1_gate_bias_init)
+            print(f"== sample-wise z1 gate enabled: Linear({2 * self.vq_embed_dim}->1), "
+                  f"weight=0, bias_init={z1_gate_bias_init}, "
+                  f"g_init=sigmoid(bias)={torch.sigmoid(self.z1_gate.bias).item():.6f} ==")
         
         # 3. RevIN
         self.revin = RevIN(self.num_features)
@@ -145,6 +153,15 @@ class GenerateReturn(pl.LightningModule):
 
         self.ic = []
         self.ric = []
+        # sample-wise gate 统计：forward 缓存最近一次 gate（detach），
+        # validation 按 epoch 聚合 count/sum/sumsq/min/max
+        self._last_z1_gate = None
+        self._val_gate_count = 0
+        self._val_gate_sum = 0.0
+        self._val_gate_sumsq = 0.0
+        self._val_gate_min = float('inf')
+        self._val_gate_max = float('-inf')
+        self._last_val_gate_summary = None
         self.best_val_loss = float('inf')
         self.best_metrics_at_min_loss = {}
         self.rank = config['predictor']['rank']
@@ -185,13 +202,16 @@ class GenerateReturn(pl.LightningModule):
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
-        if self.learnable_z1_scale:
-            # z = z0 + alpha * z1，alpha = sigmoid(z1_scale_raw) ∈ [0,1] 可学习。
-            # z0/z1 按 Stage 1 惯例 detach（Stage 1 全冻结），alpha 不 detach，
-            # 保证 z1_scale_raw 能从 Stage 2 损失获得梯度。
+        if self.samplewise_z1_gate:
+            # z_i = z0_i + g_i * z1_i，g_i = sigmoid(Linear(concat(z0_i, z1_i))) ∈ [0,1]。
+            # z0/z1 按 Stage 1 惯例 detach（Stage 1 全冻结），梯度只流向
+            # z1_gate 的 weight/bias（不回流到 z0/z1，无双重缩放）。
             z_q_levels, _, (_, min_encodings, vq_idx) = self.quantizer.forward_per_level(h_batch)
-            alpha = torch.sigmoid(self.z1_scale_raw)
-            z_q = z_q_levels[0].detach() + alpha * z_q_levels[1].detach()
+            z0 = z_q_levels[0].detach()
+            z1 = z_q_levels[1].detach()
+            g = torch.sigmoid(self.z1_gate(torch.cat([z0, z1], dim=1)))  # (B, 1)
+            z_q = z0 + g * z1
+            self._last_z1_gate = g.detach()
         else:
             z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
             z_q = z_q.detach()
@@ -226,9 +246,11 @@ class GenerateReturn(pl.LightningModule):
         self.log('train_mse_loss', mse_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # self.log('train_rank_loss', rank_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
-        if self.learnable_z1_scale:
-            # 全程记录学习中的 alpha，便于事后还原 alpha 轨迹
-            self.log('z1_alpha', torch.sigmoid(self.z1_scale_raw),
+        if self.samplewise_z1_gate:
+            # 全程记录训练中的 gate 分布（batch 级 mean/std），便于事后还原轨迹
+            g = self._last_z1_gate
+            self.log('z1_gate_mean', g.mean(), on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log('z1_gate_std', g.std() if g.numel() > 1 else torch.zeros_like(g.mean()),
                      on_step=True, on_epoch=True, logger=True, sync_dist=True)
         return {"loss": loss}
     
@@ -245,12 +267,43 @@ class GenerateReturn(pl.LightningModule):
         self.log('val_mse_loss', mse_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # self.log('val_rank_loss', rank_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('val_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
-        
+
+        if self.samplewise_z1_gate:
+            # 按 epoch 聚合 validation 上的 gate 分布（count/sum/sumsq/min/max）
+            g = self._last_z1_gate.reshape(-1).float()
+            self._val_gate_count += g.numel()
+            self._val_gate_sum += g.sum().item()
+            self._val_gate_sumsq += (g * g).sum().item()
+            self._val_gate_min = min(self._val_gate_min, g.min().item())
+            self._val_gate_max = max(self._val_gate_max, g.max().item())
+
         daily_ic, daily_ric = calc_ic(y_pred.cpu().numpy(), label.cpu().numpy())
         self.ic.append(daily_ic)
         self.ric.append(daily_ric)
         return {"loss": loss}
             
+    def _pop_val_gate_summary(self):
+        """聚合并清零本 validation epoch 的 gate 统计，返回 None 或
+        {mean, std, min, max}（std 为总体标准差）。"""
+        if self._val_gate_count == 0:
+            return None
+        n = self._val_gate_count
+        mean = self._val_gate_sum / n
+        var = max(self._val_gate_sumsq / n - mean * mean, 0.0)
+        summary = {
+            'mean': mean,
+            'std': var ** 0.5,
+            'min': self._val_gate_min,
+            'max': self._val_gate_max,
+        }
+        self._val_gate_count = 0
+        self._val_gate_sum = 0.0
+        self._val_gate_sumsq = 0.0
+        self._val_gate_min = float('inf')
+        self._val_gate_max = float('-inf')
+        self._last_val_gate_summary = summary
+        return summary
+
     def on_validation_epoch_end(self):
         current_ic = np.mean(self.ic)
         current_ric = np.mean(self.ric)
@@ -258,6 +311,15 @@ class GenerateReturn(pl.LightningModule):
         current_ricir = np.mean(self.ric) / np.std(self.ric) if np.std(self.ric) != 0 else 0
 
         val_loss_epoch = self.trainer.callback_metrics.get('val_loss')
+        gate_summary = self._pop_val_gate_summary() if self.samplewise_z1_gate else None
+        if gate_summary is not None:
+            # validation 上的 sample-wise gate 分布（整 epoch 聚合）
+            self.log_dict({
+                'Val_z1_gate_mean': gate_summary['mean'],
+                'Val_z1_gate_std': gate_summary['std'],
+                'Val_z1_gate_min': gate_summary['min'],
+                'Val_z1_gate_max': gate_summary['max'],
+            }, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         
         self.log('Val_RIC', current_ric, on_step=False, on_epoch=True, logger=True, prog_bar=True, sync_dist=True)
 
@@ -280,19 +342,26 @@ class GenerateReturn(pl.LightningModule):
                 'Best_Val_RIC': current_ric,
                 'Best_Val_RICIR': current_ricir,
             }
-            if self.learnable_z1_scale:
-                # 记录 best checkpoint 对应的 alpha（该 checkpoint 保存于本 epoch）
-                self.best_metrics_at_min_loss['Best_Val_z1_alpha'] = \
-                    float(torch.sigmoid(self.z1_scale_raw))
+            if gate_summary is not None:
+                # 记录 best checkpoint 对应 epoch 的 gate 分布
+                # （该 checkpoint 保存于本 epoch）
+                self.best_metrics_at_min_loss['Best_Val_z1_gate_mean'] = gate_summary['mean']
+                self.best_metrics_at_min_loss['Best_Val_z1_gate_std'] = gate_summary['std']
+                self.best_metrics_at_min_loss['Best_Val_z1_gate_min'] = gate_summary['min']
+                self.best_metrics_at_min_loss['Best_Val_z1_gate_max'] = gate_summary['max']
             self.log_dict(self.best_metrics_at_min_loss, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         if val_loss_epoch is not None:
             self.log('val_loss_epoch', val_loss_epoch, on_step=False, on_epoch=True, logger=True, sync_dist=True)
 
     def on_train_end(self):
-        if self.learnable_z1_scale:
-            print(f"========== Final learned z1_alpha: "
-                  f"sigmoid({self.z1_scale_raw.item():.6f}) = "
-                  f"{torch.sigmoid(self.z1_scale_raw).item():.6f} ==========")
+        if self.samplewise_z1_gate:
+            summary = self._last_val_gate_summary
+            if summary is not None:
+                print(f"========== Final z1_gate stats (last val epoch): "
+                      f"mean={summary['mean']:.6f} std={summary['std']:.6f} "
+                      f"min={summary['min']:.6f} max={summary['max']:.6f} "
+                      f"(bias={self.z1_gate.bias.item():.6f}, "
+                      f"|W|={self.z1_gate.weight.norm().item():.6f}) ==========")
 
 
     def init_from_ckpt(self, path, ignore_keys=list()):

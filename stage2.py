@@ -389,10 +389,22 @@ def train(cfg: DictConfig,
     best_model = GenerateReturn.load_from_checkpoint(best_path, config=model_config, T_max=T_max)
     best_model.freeze_vqvae()
     best_model.eval()
-    if getattr(best_model, 'learnable_z1_scale', False):
-        best_alpha = torch.sigmoid(best_model.z1_scale_raw).item()
-        print(f"========== Best checkpoint z1_alpha: {best_alpha:.6f} "
-              f"(z1_scale_raw={best_model.z1_scale_raw.item():.6f}) ==========")
+    if getattr(best_model, 'samplewise_z1_gate', False):
+        # best checkpoint 对应 gate 在整个 validation 集上的分布（仅报告用途）
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        best_model.to(device)
+        gates = []
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(valid_loader):
+                feature, prior_factor, _ = best_model._get_data(batch.to(device), batch_idx)
+                best_model.forward(feature, prior_factor)
+                gates.append(best_model._last_z1_gate.reshape(-1).cpu())
+        g = torch.cat(gates)
+        print(f"========== Best checkpoint z1_gate stats (valid set): "
+              f"mean={g.mean().item():.6f} std={g.std().item():.6f} "
+              f"min={g.min().item():.6f} max={g.max().item():.6f} "
+              f"(bias={best_model.z1_gate.bias.item():.6f}, "
+              f"|W|={best_model.z1_gate.weight.norm().item():.6f}) ==========")
 
     with torch.no_grad():
         print("========== Validation evaluation ==========")

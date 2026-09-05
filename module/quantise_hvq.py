@@ -80,8 +80,8 @@ class ResidualVectorQuantiser(nn.Module):
         其中 z_q_levels 是长度为 num_levels 的 list，z_q_levels[l] 为第 l 级的
         量化输出（各级 VectorQuantiser 内部 STE 保证梯度可回传到 h_batch）。
         z_q_levels 满足 sum(z_q_levels) 在数值上等于 forward(h_batch) 的 z_q。
-        用于 learnable-z1-scale 实验：Stage 2 自行按 z0 + alpha * z1 融合，
-        不改变 forward 的默认 z0 + z1 行为。
+        用于 learnable-z1-scale / samplewise-z1-gate 实验：Stage 2 自行按
+        z0/z1 融合（如 z0 + g * z1），不改变 forward 的默认 z0 + z1 行为。
         """
         residual = h_batch
         z_q_levels = []
