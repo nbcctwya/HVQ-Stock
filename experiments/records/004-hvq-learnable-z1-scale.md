@@ -98,25 +98,12 @@ checkpoint `state_dict['z1_scale_raw']` 可正确恢复该值；wandb 记录
 
 ## Result
 
-Status: PENDING
+Status: FAILED
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
-
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
-
-Phase 2 正式结果除常规指标外，必须报告最终/best-checkpoint 的 α：
-从 best checkpoint `state_dict['z1_scale_raw']`（α = sigmoid(raw)）、
-运行日志的 `Best checkpoint z1_alpha` / `Final learned z1_alpha`，以及
-wandb 指标 `z1_alpha` / `Best_Val_z1_alpha` 读取。
+失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/004/run/stage2.log
 
 ## Conclusion
 
-正式实验完成后填写。
+Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/004/run/stage2.log
+
+全部 artifact 与日志保留在 `artifacts/004/run/`。
