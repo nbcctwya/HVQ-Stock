@@ -81,22 +81,44 @@ artifact_root 的上一轮 smoke 完全一致，仅供流程验证）；全部�
 
 ## Result
 
-Status: DONE（test 区间 2023-01-01 – 2025-12-31）
+Status: DONE — Corrected Protocol seed0（test 区间 2023-01-01 – 2025-12-31）
+
+协议：corrected Stage 2 freeze（encoder/quantizer/RevIN 全程 eval）+ corrected MDD（初始 NAV=1 计入 peak）；Stage 2 seed 0；回测 Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，close 成交，CN limit=None。
 
 IC: 0.0317
 ICIR: 0.1697
 RankIC: 0.0508
 RankICIR: 0.2664
 
-Annual Return: 9.72%（基准 6.40%，超额 3.32%）
+Annual Return: 9.72%（基准 6.40%，超额 3.32%，AR 差值口径）
 Sharpe: 0.6638
 Sortino: 0.9282
 MDD: -16.32%
 Calmar: 0.5955
 Turnover: 0.3251
 
+Stage 1 checkpoint provenance：self-trained（seed 42，Phase 2 正式训练）：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`（`artifacts/002/run/checkpoints/`，未重训）。
+Stage 2 seed：0
+产物：`artifacts/002/run/`（checkpoints/、res/、backtest、summary.json、stage1/stage2/backtest 日志）。
+
+代码版本：实验代码 1d16627 + 公共 correctness fix 726836e（新增 `train()` 覆写强制冻结模块 eval；不改变实验 Idea、结构、超参、数据或协议）。
+
+### Historical（不再作为正式比较依据）
+
+pre-fix seed0（无 freeze override + 旧 MDD 实现，旧产物备份于 `artifacts/002/run/pre_fix/`）：IC 0.0317 / ICIR 0.1697 / RankIC 0.0508 / RankICIR 0.2664 / AR 9.72% / Sharpe 0.6638 / MDD -16.32% / Calmar 0.5955 / Turnover 0.3251。
+
+### Corrected 与 Historical 的关系
+
+corrected 重跑与 historical 逐位一致，原因同 001（PL 2.6.4 逐子模块 restore mode + 净值曾超过初始 NAV）。corrected 协议确认了旧数值有效。
+
 ## Conclusion
 
-Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt`（self-trained）；Stage 2 seed 0。
-
-产物：`artifacts/002/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+Corrected Protocol 下，gated fusion（002）相对 corrected baseline（fixed fusion）：
+ranking 指标略低（IC 0.0317 vs 0.0373，RankIC 0.0508 vs 0.0552），
+组合层面互有胜负（AR 9.72% vs 9.24% 略高，Sharpe 0.6638 vs 0.5223 更高，
+MDD -16.32% vs -26.90% 明显更好，Turnover 相近）。
+结论：gated fusion 在 corrected protocol 下并非"明显弱于" fixed fusion——
+排序能力略降，但风险调整收益与回撤更好。
+注意：002 的 Stage 1 为本仓库自训实例（val_loss 0.5933），与 baseline 所用
+PRISM-VQ 原始 checkpoint（epoch=7, val_loss 0.5712）不是同一训练实例，
+该差异是本比较的已知混淆因素。

@@ -1,0 +1,61 @@
+# Corrected Protocol 统一比较（seed 0，CSI300，test 2023-01-01 – 2025-12-31）
+
+四个模型使用完全统一的 corrected 协议重新评估：corrected Stage 2 freeze
+（encoder/quantizer/RevIN 全程 eval）+ corrected MDD（初始 NAV=1 计入 peak）；
+Stage 2 seed 0；回测 Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，
+close 成交，CN limit=None。旧结果（pre-fix）已在各 record 中标记为
+Historical，不再作为比较依据。
+
+| Model | IC | ICIR | RankIC | RankICIR | Annual Return | Excess | Sharpe | Sortino | MDD | Calmar | Turnover |
+| ----- | -: | ---: | -----: | -------: | ------------: | -----: | -----: | ------: | --: | -----: | -------: |
+| PRISM-VQ baseline | 0.0373 | 0.2214 | 0.0552 | 0.3313 | 9.24% | 2.84% | 0.5223 | 0.7690 | -26.90% | 0.3436 | 0.3295 |
+| 001 hvq-residual-2level (z0+z1) | 0.0352 | 0.2174 | 0.0506 | 0.3171 | 13.69% | 7.29% | 0.7591 | 1.1405 | -18.49% | 0.7401 | 0.3293 |
+| 002 prior-gated-fusion | 0.0317 | 0.1697 | 0.0508 | 0.2664 | 9.72% | 3.32% | 0.6638 | 0.9282 | -16.32% | 0.5955 | 0.3251 |
+| 003 hvq-z0-only (z0) | 0.0333 | 0.1810 | 0.0533 | 0.2830 | 11.23% | 4.83% | 0.7651 | 1.1160 | -12.64% | 0.8886 | 0.3275 |
+
+Excess = 组合 AR 与基准 AR（6.40%）的差值。benchmark = SH000300。
+
+## Stage 1 checkpoint provenance
+
+| Model | Stage 1 checkpoint | 来源 |
+| ----- | ------------------ | ---- |
+| baseline | `infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt` | PRISM-VQ 原始 Stage 1（epoch=9 ckpt 已缺失，见 baseline_results/CORRECTED_PROTOCOL.md） |
+| 001 | `hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt` | self-trained（seed 42），迁入 `artifacts/001/run/checkpoints/` |
+| 002 | `infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=10-val_loss=0.5933.ckpt` | self-trained（seed 42，Phase 2） |
+| 003 | 同 001 | `stage1_source: "001"` 显式复用 |
+
+注意：baseline、001、002 的 Stage 1 是同一架构的不同训练实例
+（val_loss 0.5712 / 0.4592 / 0.5933），跨模型比较存在该实例差异；
+仅 001 vs 003 共享同一份 Stage 1 checkpoint，是完全受控比较。
+
+## 结论
+
+### baseline vs 001
+
+ranking 指标 baseline 略高（IC 0.0373 vs 0.0352，RankIC 0.0552 vs 0.0506），
+组合层面 001 明显更优（AR 13.69% vs 9.24%，Sharpe 0.7591 vs 0.5223，
+MDD -18.49% vs -26.90%，Calmar 0.7401 vs 0.3436）。
+Residual HVQ 在 corrected protocol 下组合表现优于单层 baseline。
+
+### 001 vs 003（共享 Stage 1，完全受控）
+
+003（z0-only）RankIC 更高（0.0533 vs 0.0506）、Sharpe 持平略高
+（0.7651 vs 0.7591）、MDD 明显更好（-12.64% vs -18.49%），
+IC 略低（0.0333 vs 0.0352）、AR 略低（11.23% vs 13.69%）。
+结论：第二级残差量化 z1 对下游收益预测没有稳定贡献，
+"z1 主要携带 reconstruction/detail 信息、对收益预测帮助有限"的信号
+在 corrected protocol 下仍然成立。
+
+### baseline vs 002
+
+gated fusion 排序能力略低于 fixed fusion（IC 0.0317 vs 0.0373，
+RankIC 0.0508 vs 0.0552），但组合层面不差（AR 9.72% vs 9.24%，
+Sharpe 0.6638 vs 0.5223，MDD -16.32% vs -26.90%）。
+gated fusion 在 corrected protocol 下并非明显弱于 fixed fusion。
+
+## 产物位置
+
+- baseline：`artifacts/baseline/run/`
+- 001：`artifacts/001/run/`
+- 002：`artifacts/002/run/`（pre-fix 备份在 `pre_fix/`）
+- 003：`artifacts/003/run/`（pre-fix 备份在 `pre_fix/`）

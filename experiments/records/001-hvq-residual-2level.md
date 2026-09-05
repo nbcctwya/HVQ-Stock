@@ -51,22 +51,43 @@ Notes: Stage 1 训练至 epoch 20 触发 early stop，最佳 epoch 5
 
 ## Result
 
-Status: DONE（test 区间 2023-01-01 – 2025-12-31）
+Status: DONE — Corrected Protocol seed0（test 区间 2023-01-01 – 2025-12-31）
+
+协议：corrected Stage 2 freeze（encoder/quantizer/RevIN 全程 eval）+ corrected MDD（初始 NAV=1 计入 peak）；Stage 2 seed 0；回测 Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，close 成交，CN limit=None。
 
 IC: 0.0352
 ICIR: 0.2174
 RankIC: 0.0506
 RankICIR: 0.3171
 
-Annual Return: 13.69%（基准 6.40%，超额 7.29%）
+Annual Return: 13.69%（基准 6.40%，超额 7.29%，AR 差值口径）
 Sharpe: 0.7591
 Sortino: 1.1405
 MDD: -18.49%
 Calmar: 0.7401
 Turnover: 0.3293
 
+Stage 1 checkpoint provenance：self-trained（seed 42）：`hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`，由项目级 `checkpoints/` 原样迁入 `artifacts/001/run/checkpoints/`（Stage 1 不受本轮修复影响，未重训）。
+Stage 2 seed：0
+产物：`artifacts/001/run/`（checkpoints/、res/、backtest、summary.json、stage1/stage2/backtest 日志）。
+
+代码版本：实验代码 0a75fd1/ab3e117 + 公共 correctness fix ea11ab3（`train()` 覆写将冻结保护从 quantizer 扩展到 encoder/RevIN；不改变实验 Idea、结构、超参、数据或协议）。
+
+### Historical（不再作为正式比较依据）
+
+pre-fix seed0（quantizer-only freeze override + 旧 MDD 实现，旧产物在项目级 `res/` 与 `logs/`）：IC 0.0352 / ICIR 0.2174 / RankIC 0.0506 / RankICIR 0.3171 / AR 13.69% / Sharpe 0.7591 / MDD -18.49% / Calmar 0.7401 / Turnover 0.3293。
+
+### Corrected 与 Historical 的关系
+
+corrected 重跑与 historical 逐位一致。PL 2.6.4 的 validation loop 按子模块 capture/restore training mode，`freeze_vqvae()` 的 eval 设置在旧代码路径下也未被破坏，freeze bug 在本环境未实际触发；MDD 修复对本实验数值无影响（净值在最大回撤前已超过初始 NAV 1.0）。corrected 协议确认了旧数值有效。
+
 ## Conclusion
 
-Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（self-trained）；Stage 2 seed 0。
-
-产物：`artifacts/001/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+Corrected Protocol 下，Residual HVQ（z0+z1）相对 corrected PRISM-VQ baseline：
+ranking 指标略低（IC 0.0352 vs 0.0373，RankIC 0.0506 vs 0.0552），
+但组合层面明显更优（AR 13.69% vs 9.24%，Sharpe 0.7591 vs 0.5223，
+MDD -18.49% vs -26.90%）。两级 HVQ 在 corrected protocol 下整体优于单层
+baseline 的组合表现，ranking 指标上基本持平略弱。
+注意：001 的 Stage 1 为本仓库自训（val_loss 0.4592），baseline 的 Stage 1 为
+PRISM-VQ 原始 checkpoint（epoch=7, val_loss 0.5712），两者是同一架构的
+不同训练实例，比较时存在该实例差异。

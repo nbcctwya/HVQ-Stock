@@ -72,22 +72,43 @@ diff 确认无任何写入。
 
 ## Result
 
-Status: DONE（test 区间 2023-01-01 – 2025-12-31）
+Status: DONE — Corrected Protocol seed0（test 区间 2023-01-01 – 2025-12-31）
+
+协议：corrected Stage 2 freeze（encoder/quantizer/RevIN 全程 eval）+ corrected MDD（初始 NAV=1 计入 peak）；Stage 2 seed 0；回测 Top30/Drop5，open 0.0005 / close 0.0015，min_cost 0，close 成交，CN limit=None。
 
 IC: 0.0333
 ICIR: 0.1810
 RankIC: 0.0533
 RankICIR: 0.2830
 
-Annual Return: 11.23%（基准 6.40%，超额 4.83%）
+Annual Return: 11.23%（基准 6.40%，超额 4.83%，AR 差值口径）
 Sharpe: 0.7651
 Sortino: 1.1160
 MDD: -12.64%
 Calmar: 0.8886
 Turnover: 0.3275
 
+Stage 1 checkpoint provenance：reused 自实验 001（`stage1_source: "001"`，结构与数值均验证一致）：`artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`，本实验未重新训练 Stage 1。
+Stage 2 seed：0
+产物：`artifacts/003/run/`（checkpoints/、res/、backtest、summary.json、stage1/stage2/backtest 日志）。
+
+代码版本：实验代码 057a722 + 公共 correctness fix b84ba53（同 001 的 freeze 扩展修复；不改变实验 Idea、结构、超参、数据或协议）。
+
+### Historical（不再作为正式比较依据）
+
+pre-fix seed0（quantizer-only freeze override + 旧 MDD 实现，旧产物备份于 `artifacts/003/run/pre_fix/`）：IC 0.0333 / ICIR 0.1810 / RankIC 0.0533 / RankICIR 0.2830 / AR 11.23% / Sharpe 0.7651 / MDD -12.64% / Calmar 0.8886 / Turnover 0.3275。
+
+### Corrected 与 Historical 的关系
+
+corrected 重跑与 historical 逐位一致，原因同 001。此外 corrected 轮的 Stage 1 由自有 checkpoint 切换为显式复用 001 的正式 checkpoint（数值等价，provenance 更清晰）。
+
 ## Conclusion
 
-Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
-
-产物：`artifacts/003/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+Corrected Protocol 下，z0-only（003）与完整 z0+z1（001）使用同一份
+Stage 1 checkpoint（显式复用）：003 RankIC 0.0533 高于 001 的 0.0506，
+IC 0.0333 略低于 0.0352，Sharpe 0.7651 vs 0.7591 持平略高，
+MDD -12.64% 明显优于 001 的 -18.49%，AR 11.23% 低于 13.69%。
+结论：第二级残差量化 z1 对下游收益预测没有稳定贡献——去掉 z1 后 RankIC、
+Sharpe、MDD 均不差甚至更优，仅 AR 与 IC 略降。此前"z1 可能主要携带
+reconstruction/detail 信息、对收益预测帮助有限"的信号在 corrected
+protocol 下仍然成立。
