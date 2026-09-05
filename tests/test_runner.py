@@ -153,5 +153,137 @@ class SelectExperimentsTest(unittest.TestCase):
         self.assertEqual([e["id"] for e in selected], ["004"])
 
 
+class Stage1MarkerSourceConsistencyTest(unittest.TestCase):
+    """Fix 1: marker provenance must match the queue's current stage1_source."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        self.ck001 = self._make_source("001")
+        self.ck003 = self._make_source("003")
+        self.run_dir = self.repo / "artifacts" / "010" / "run"
+        self.run_dir.mkdir(parents=True)
+
+    def _make_source(self, sid):
+        src_run = self.repo / "artifacts" / sid / "run"
+        ck = make_ckpt(src_run, f"hvq_{sid}-epoch=5-val_loss=0.4592.ckpt")
+        (src_run / ".stage1.done").write_text(f"best={ck.name}\nval_loss=0.4592\n")
+        return ck.resolve()
+
+    def _mark_downstream_done(self):
+        (self.run_dir / ".stage2.done").write_text("res=x\n")
+        (self.run_dir / ".backtest.done").write_text("metric=y\n")
+
+    def test_source_changed_001_to_003_rejects_old_marker(self):
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={self.ck001}\nsource=001\nreused=true\n"
+        )
+        self._mark_downstream_done()
+
+        ckpt, prov = runner.stage1(
+            self.repo, self.run_dir, {"id": "010", "stage1_source": "003"}
+        )
+
+        self.assertEqual(ckpt, self.ck003)
+        self.assertEqual(prov["source_id"], "003")
+        # Downstream markers invalidated; own marker re-recorded for 003.
+        self.assertFalse((self.run_dir / ".stage2.done").exists())
+        self.assertFalse((self.run_dir / ".backtest.done").exists())
+        info = runner.read_stage1_marker(self.run_dir / ".stage1.done")
+        self.assertEqual(info["source"], "003")
+        self.assertEqual(info["reused"], "true")
+
+    def test_self_marker_rejected_when_source_set_to_001(self):
+        own = make_ckpt(self.run_dir, "infu_y-epoch=1-val_loss=0.8000.ckpt")
+        (self.run_dir / ".stage1.done").write_text(f"best={own.name}\nval_loss=0.8\n")
+        self._mark_downstream_done()
+
+        ckpt, prov = runner.stage1(
+            self.repo, self.run_dir, {"id": "010", "stage1_source": "001"}
+        )
+
+        self.assertEqual(ckpt, self.ck001)
+        self.assertEqual(prov["mode"], "reused")
+        self.assertFalse((self.run_dir / ".stage2.done").exists())
+        self.assertFalse((self.run_dir / ".backtest.done").exists())
+
+    def test_matching_source_resumes_normally(self):
+        (self.run_dir / ".stage1.done").write_text(
+            f"best={self.ck001}\nsource=001\nreused=true\n"
+        )
+        self._mark_downstream_done()
+
+        ckpt, prov = runner.stage1(
+            self.repo, self.run_dir, {"id": "010", "stage1_source": "001"}
+        )
+
+        self.assertEqual(ckpt, self.ck001)
+        self.assertEqual(prov["mode"], "reused")
+        # Downstream markers untouched on a consistent resume.
+        self.assertTrue((self.run_dir / ".stage2.done").exists())
+        self.assertTrue((self.run_dir / ".backtest.done").exists())
+
+
+class Stage2MarkerConsistencyTest(unittest.TestCase):
+    """Fix 2: .stage2.done is only valid for the stage1 checkpoint it used."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        self.run_dir = self.repo / "artifacts" / "010" / "run"
+        self.ckpt_a = make_ckpt(self.run_dir, "a-epoch=1-val_loss=0.5000.ckpt").resolve()
+        self.ckpt_b = make_ckpt(self.run_dir, "b-epoch=1-val_loss=0.4000.ckpt").resolve()
+        self.res = self.run_dir / "res" / "fake_run"
+        self.res.mkdir(parents=True)
+        (self.res / "0_best.pkl").write_bytes(b"pred")
+        (self.res / "0_metric.csv").write_text(",values\nIC,0.01\n")
+
+    def test_same_ckpt_skips_stage2(self):
+        (self.run_dir / ".stage2.done").write_text(f"res=fake_run\nckpt={self.ckpt_a}\n")
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("stage2 must not run")
+
+        orig = runner.run_with_retries
+        runner.run_with_retries = forbidden
+        try:
+            res = runner.stage2(self.repo, self.run_dir, self.ckpt_a)
+        finally:
+            runner.run_with_retries = orig
+        self.assertEqual(res, self.res)
+
+    def test_relative_and_absolute_refs_compare_equal(self):
+        # Marker stores the bare filename; current ckpt arrives as an
+        # absolute path — they must be recognized as the same checkpoint.
+        (self.run_dir / ".stage2.done").write_text(
+            f"res=fake_run\nckpt={self.ckpt_a.name}\n"
+        )
+        res = runner.stage2(self.repo, self.run_dir, self.ckpt_a)
+        self.assertEqual(res, self.res)
+
+    def test_changed_ckpt_reruns_stage2_and_invalidates_backtest(self):
+        (self.run_dir / ".stage2.done").write_text(f"res=fake_run\nckpt={self.ckpt_a}\n")
+        (self.run_dir / ".backtest.done").write_text("metric=x\n")
+
+        calls = []
+        orig = runner.run_with_retries
+
+        def fake_run(cmd, log_path, cwd, attempts):
+            calls.append(cmd)
+            # Simulated stage2 leaves fresh prediction/metric outputs.
+
+        runner.run_with_retries = fake_run
+        try:
+            res = runner.stage2(self.repo, self.run_dir, self.ckpt_b)
+        finally:
+            runner.run_with_retries = orig
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(res, self.res)
+        self.assertFalse((self.run_dir / ".backtest.done").exists())
+        info = runner.read_stage1_marker(self.run_dir / ".stage2.done")
+        self.assertEqual(info["ckpt"], str(self.ckpt_b))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -172,15 +172,32 @@ def resolve_marker_ckpt(repo: Path, run_dir: Path, info: dict):
     best = info.get("best")
     if not best:
         return None
-    p = Path(best)
-    if not p.is_absolute():
-        p = run_dir / "checkpoints" / p.name
-    p = p.resolve()
+    p = _normalize_ckpt_ref(run_dir, best)
     if not p.is_relative_to((repo / "artifacts").resolve()):
         return None
     if not p.is_file() or p.stat().st_size == 0:
         return None
     return p
+
+
+def _normalize_ckpt_ref(run_dir: Path, ref: str) -> Path:
+    """Normalize a checkpoint reference (bare filename or absolute path) to a
+    resolved absolute path, so equivalent references compare equal."""
+    p = Path(ref)
+    if not p.is_absolute():
+        p = run_dir / "checkpoints" / p.name
+    return p.resolve()
+
+
+def marker_matches_source(info: dict, source: str) -> bool:
+    """Check .stage1.done provenance against the queue's current stage1_source.
+
+    ``self`` accepts only self-trained markers; ``<ID>`` accepts only markers
+    recorded as reused from exactly that source experiment.
+    """
+    if source == "self":
+        return info.get("reused") != "true"
+    return info.get("reused") == "true" and info.get("source") == source
 
 
 def find_stage2_outputs(run_dir: Path):
@@ -311,15 +328,27 @@ def stage1(repo: Path, run_dir: Path, exp: dict):
     source = str(exp.get("stage1_source") or "self")
 
     # Resume path: trust the exact checkpoint recorded in the marker instead
-    # of rescanning the shared checkpoint directory.
+    # of rescanning the shared checkpoint directory. The marker is only valid
+    # when its provenance matches the queue's current stage1_source.
     if marker.exists():
         info = read_stage1_marker(marker)
         ckpt = resolve_marker_ckpt(repo, run_dir, info)
-        if ckpt is not None:
+        if ckpt is not None and marker_matches_source(info, source):
             mode = "reused" if info.get("reused") == "true" else "self"
             log(f"stage1 already complete (best={ckpt.name}, mode={mode}), skipping")
             return ckpt, {"mode": mode, "source_id": info.get("source"), "ckpt": str(ckpt)}
-        log("stage1 marker points to a missing/invalid checkpoint, re-resolving stage1")
+        if ckpt is not None:
+            log(
+                f"stage1 marker provenance (reused={info.get('reused')}, "
+                f"source={info.get('source')}) does not match current "
+                f"stage1_source={source}; re-resolving stage1"
+            )
+        else:
+            log("stage1 marker points to a missing/invalid checkpoint, re-resolving stage1")
+        # The stage1 input may change: downstream results are no longer valid.
+        marker.unlink(missing_ok=True)
+        for downstream in (".stage2.done", ".backtest.done"):
+            (run_dir / downstream).unlink(missing_ok=True)
 
     if source != "self":
         ckpt = reuse_stage1_ckpt(repo, source, exp["id"])
@@ -350,8 +379,17 @@ def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
     marker = run_dir / ".stage2.done"
     res_subdir = find_stage2_outputs(run_dir)
     if marker.exists() and res_subdir is not None:
-        log(f"stage2 already complete (res={res_subdir.name}), skipping")
-        return res_subdir
+        # Only skip when the recorded stage2 run used exactly the current
+        # stage1 checkpoint (normalized absolute-path comparison).
+        info = read_stage1_marker(marker)
+        recorded = info.get("ckpt")
+        if recorded and _normalize_ckpt_ref(run_dir, recorded) == Path(ckpt).resolve():
+            log(f"stage2 already complete (res={res_subdir.name}), skipping")
+            return res_subdir
+        log(
+            f"stage2 marker ckpt ({recorded}) != current stage1 checkpoint "
+            f"({Path(ckpt).resolve()}); rerunning stage2"
+        )
     marker.unlink(missing_ok=True)
     (run_dir / ".backtest.done").unlink(missing_ok=True)
     artifact_root = run_dir.relative_to(repo)
@@ -372,7 +410,7 @@ def stage2(repo: Path, run_dir: Path, ckpt: Path) -> Path:
     res_subdir = find_stage2_outputs(run_dir)
     if res_subdir is None:
         raise StageError("stage2 finished but prediction/metric artifacts not found")
-    marker.write_text(f"res={res_subdir.name}\nckpt={saved_model}\n")
+    marker.write_text(f"res={res_subdir.name}\nckpt={Path(ckpt).resolve()}\n")
     log(f"stage2 done: res={res_subdir.name}")
     return res_subdir
 
