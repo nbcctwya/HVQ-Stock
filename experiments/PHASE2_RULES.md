@@ -160,3 +160,42 @@ Phase 2 必要时只允许修改：
 - 是否运行并通过相关测试；
 - 当前 queue 是否处理完成；
 - 哪些实验需要重新进入 Phase 1。
+
+## 9. 通知策略（邮件）
+
+邮件通知属于 **Supervisor 层**：`experiments/notify.py` 是唯一的邮件
+发送器（纯 SMTP 投递，不理解实验逻辑、不读 queue、不做 A/B/C 分类），
+Supervisor 统一调用它，不得自己临时实现 SMTP；`runner.py` 不参与任何
+通知逻辑。
+
+触发策略：
+
+- 单个实验 DONE：**不发**邮件；
+- 单个 A 类实验失败、但 batch 可以继续：**不立即发**（记入最终 summary）；
+- B 类问题自动修复成功：**不发**；
+- C 类公共问题自动修复成功并继续：**不发**；
+- 整个 Phase 2 batch 处理结束：**固定发送一封 summary 邮件**，标题：
+  `[HVQ] Phase2 completed — <DONE> DONE / <FAILED> FAILED`；
+- 出现无法安全自动处理、必须人工介入、batch 无法继续的情况：**立即**
+  发送 attention-required 邮件，标题：
+  `[HVQ] Phase2 attention required — stopped at <ID>`。
+
+邮件正文至少包含：
+
+- DONE 实验列表；
+- FAILED 实验列表；
+- 每个 FAILED 的 A/B/C 分类及原因；
+- 是否做过环境修复 / 公共基础设施修复；
+- 当前 queue 状态；
+- 哪些实验需要重新进入 Phase 1；
+- attention-required 邮件还必须说明：为什么 Supervisor 无法安全继续。
+
+**Notification failure != Experiment failure。** 邮件发送失败不得：
+
+- 修改 queue 状态（不得把 done 改成 failed，反之亦然）；
+- 删除、重跑或修改任何实验、artifact、marker；
+- 影响 runner 的正式执行结果；
+- 停止或回滚已经完成的实验。
+
+Supervisor 只需在最终汇报中注明 `Notification: FAILED`（及原因），
+然后正常结束。

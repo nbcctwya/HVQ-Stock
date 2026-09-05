@@ -35,6 +35,23 @@ executor；Supervisor 只在外层负责逐实验编排、错误分类和安全�
      * C（Runner/公共基础设施问题）：暂停 batch，确认确为公共问题后
        只对 main 上的公共执行基础设施做最小修复，运行并通过相关测试
        （至少 tests/test_runner.py），再利用 resume 继续 batch。
+5. 邮件通知（Supervisor 层，统一调用 experiments/notify.py，
+   不得自己临时实现 SMTP）：
+   - 整个 batch 正常处理结束后：生成一份纯文本 summary（正文要求见
+     PHASE2_RULES.md 第 9 节），写入临时文件后调用：
+         python experiments/notify.py \
+           --subject "[HVQ] Phase2 completed — <DONE> DONE / <FAILED> FAILED" \
+           --body-file /tmp/phase2_summary.txt
+   - 出现必须人工介入、batch 无法安全继续的情况：立即生成 alert 正文
+     （说明为什么无法安全继续）并调用：
+         python experiments/notify.py \
+           --subject "[HVQ] Phase2 attention required — stopped at <ID>" \
+           --body-file /tmp/phase2_attention.txt
+   - 单个实验 DONE、可继续的 A 类失败、自动修复成功的 B/C 类问题：
+     不单独发邮件，只记入最终 summary。
+   - 邮件发送失败只记录 warning（最终汇报中注明
+     "Notification: FAILED"），不改变任何实验状态，不因为 SMTP 问题
+     停止或回滚已经完成的实验。
 
 禁止事项：
 - 修改已冻结实验的研究逻辑、模型、配置、seed、数据划分、回测协议；
@@ -49,5 +66,7 @@ executor；Supervisor 只在外层负责逐实验编排、错误分类和安全�
 - 是否做过环境修复或公共基础设施修复，分别修了什么；
 - 运行了哪些测试及结果；
 - 当前 queue 剩余状态（是否全部处理完成）；
-- 哪些实验需要重新进入 Phase 1。
+- 哪些实验需要重新进入 Phase 1；
+- 邮件通知状态（summary 是否已发送；失败时注明
+  "Notification: FAILED" 及原因）。
 ```
