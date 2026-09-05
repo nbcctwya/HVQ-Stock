@@ -32,5 +32,5 @@ experiments:
     name: hvq-z0-only
     base: exp/001-hvq-residual-2level
     branch: exp/003-hvq-z0-only
-    status: running
+    status: done
     stage1_source: "001"

@@ -88,6 +88,6 @@ Turnover: 0.3275
 
 ## Conclusion
 
-Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=5-val_loss=0.4592.ckpt`；Stage 2 seed 0。
+Phase 2 固定执行器完成正式训练、预测与回测。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
 
 产物：`artifacts/003/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
