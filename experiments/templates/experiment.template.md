@@ -20,7 +20,8 @@
 
 Base:
 Branch:
-Commit:
+Commit:    # Final Experiment Commit 完整 sha（见 RULES 第 5 节；
+           # 必须与 queue.commit、分支冻结 HEAD 完全一致）
 
 ## Smoke Test
 

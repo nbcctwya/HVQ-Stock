@@ -34,7 +34,11 @@ A queue entry declares its stage1 provenance via ``stage1_source``:
   root).
 
 The source is declared by the experiment author in Phase 1; the runner never
-infers it.
+infers it. For experiment→experiment reuse the runner additionally verifies
+that the source's stage1 marker was recorded under the source experiment's
+own pinned commit (taken from the canonical queue read on main, never from a
+stale queue copy on a detached experiment commit); a missing or mismatching
+commit fails loudly — no reuse, no silent retrain.
 
 The runner only invokes the existing entry points (stage1.py, stage2.py,
 backtest_qlib.py) and never touches experiment logic, hyperparameters, data
@@ -413,11 +417,18 @@ def update_record(repo: Path, exp: dict, result_text: str, conclusion: str) -> N
     path.write_text(new_text)
 
 
-def reuse_stage1_ckpt(repo: Path, source_id: str, exp_id: str) -> Path:
+def reuse_stage1_ckpt(repo: Path, source_id: str, exp_id: str, source_exp: dict = None) -> Path:
     """Load the exact stage1 best checkpoint of a finished source experiment.
 
     Fails loudly when the source artifacts are missing or corrupt; the runner
     must never silently retrain stage1 for a stage2-only experiment.
+
+    When ``source_exp`` (the source experiment's canonical queue entry, read
+    from the queue on main — never a stale queue copy from a detached
+    experiment commit) is given, the source marker's recorded commit must
+    equal the source experiment's pinned commit. A missing or mismatching
+    commit means the source stage1 artifacts were not produced under the
+    source's Final Experiment Commit: refuse to reuse, refuse to retrain.
     """
     if source_id == str(exp_id):
         raise StageError(
@@ -431,6 +442,25 @@ def reuse_stage1_ckpt(repo: Path, source_id: str, exp_id: str) -> Path:
             f"({src_marker}); refusing to retrain stage1 for this experiment"
         )
     info = read_stage1_marker(src_marker)
+    if source_exp is not None:
+        expected = str(source_exp.get("commit") or "").strip()
+        recorded = (info.get("commit") or "").strip()
+        if not expected:
+            raise StageError(
+                f"stage1_source={source_id}: source queue entry has no pinned "
+                f"commit; cannot verify stage1 provenance, refusing to reuse"
+            )
+        if not recorded:
+            raise StageError(
+                f"stage1_source={source_id}: source stage1 marker has no commit "
+                f"provenance; refusing to reuse (and refusing to retrain)"
+            )
+        if recorded != expected:
+            raise StageError(
+                f"stage1_source={source_id}: source stage1 marker commit "
+                f"{recorded!r} != source pinned commit {expected!r}; refusing "
+                f"to reuse (and refusing to retrain)"
+            )
     ckpt = resolve_marker_ckpt(repo, src_run, info)
     if ckpt is None:
         raise StageError(
@@ -440,8 +470,13 @@ def reuse_stage1_ckpt(repo: Path, source_id: str, exp_id: str) -> Path:
     return ckpt
 
 
-def stage1(repo: Path, run_dir: Path, exp: dict):
-    """Return (ckpt_path, provenance) for the experiment's stage1 checkpoint."""
+def stage1(repo: Path, run_dir: Path, exp: dict, queue_by_id: dict = None):
+    """Return (ckpt_path, provenance) for the experiment's stage1 checkpoint.
+
+    ``queue_by_id`` maps experiment ids to their canonical queue entries
+    (read from the queue on main); it is used to verify experiment→experiment
+    stage1 provenance against the source experiment's pinned commit.
+    """
     marker = run_dir / ".stage1.done"
     source = str(exp.get("stage1_source") or "self")
     commit = str(exp.get("commit") or "")
@@ -490,7 +525,14 @@ def stage1(repo: Path, run_dir: Path, exp: dict):
         return external, {"mode": "reused", "source_id": "external", "ckpt": str(external)}
 
     if source != "self":
-        ckpt = reuse_stage1_ckpt(repo, source, exp["id"])
+        source_exp = None
+        if queue_by_id is not None:
+            source_exp = queue_by_id.get(source)
+            if source_exp is None:
+                raise StageError(
+                    f"stage1_source={source}: no such experiment in the queue"
+                )
+        ckpt = reuse_stage1_ckpt(repo, source, exp["id"], source_exp)
         marker.write_text(f"best={ckpt}\nsource={source}\nreused=true\ncommit={commit}\n")
         log(f"stage1 reused from experiment {source}: {ckpt}")
         return ckpt, {"mode": "reused", "source_id": source, "ckpt": str(ckpt)}
@@ -620,11 +662,18 @@ def build_result_text(metrics: dict, port: dict, bench: dict) -> str:
     return "\n".join(lines)
 
 
-def run_experiment(repo: Path, exp: dict, valid_ids) -> bool:
+def run_experiment(repo: Path, exp: dict, experiments) -> bool:
     exp_id, name, branch = exp["id"], exp["name"], exp["branch"]
     log(f"===== experiment {exp_id} ({name}) on {branch} =====")
     run_dir = run_dir_for(repo, exp_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Canonical queue metadata, loaded from the queue on main in main()
+    # before any checkout; used for stage1_source validation and for the
+    # experiment→experiment stage1 provenance check. Never re-read the
+    # queue from a detached experiment commit (it may be a stale copy).
+    valid_ids = {e["id"] for e in experiments}
+    queue_by_id = {e["id"]: e for e in experiments}
 
     set_queue_status(repo, exp_id, "running")
     commit_main(repo, f"Phase 2: start {exp_id}-{name} (running)")
@@ -639,7 +688,7 @@ def run_experiment(repo: Path, exp: dict, valid_ids) -> bool:
         checkout_experiment(repo, branch, commit)
         universe = read_branch_universe(repo)
         exp = dict(exp, commit=commit)
-        ckpt, stage1_prov = stage1(repo, run_dir, exp)
+        ckpt, stage1_prov = stage1(repo, run_dir, exp, queue_by_id)
         res_subdir = stage2(repo, run_dir, ckpt, commit)
         metric_path = backtest(repo, run_dir, res_subdir, universe, commit)
 
@@ -731,10 +780,9 @@ def main() -> int:
         return 0
 
     log(f"experiments to run: {[e['id'] for e in selected]}")
-    valid_ids = {e["id"] for e in experiments}
     results = {}
     for exp in selected:
-        results[exp["id"]] = run_experiment(repo, exp, valid_ids)
+        results[exp["id"]] = run_experiment(repo, exp, experiments)
 
     log(f"all done: {results}")
     return 0 if all(results.values()) else 1

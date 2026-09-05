@@ -13,10 +13,12 @@
 #             experiment, use that experiment's branch, e.g.
 #             "exp/001-hvq-residual-2level". Never infer this.
 #   branch  : always "exp/<id>-<name>", e.g. exp/004-market-gated-z1.
-#   commit  : full sha of the experiment branch's final code commit,
-#             recorded when the experiment enters the queue. Phase 2
-#             executes exactly this pinned commit (detached HEAD), never
-#             the branch's latest HEAD. Required.
+#   commit  : Final Experiment Commit — full sha of the experiment's
+#             final (frozen) code commit, recorded when the experiment
+#             enters the queue. Must equal the record's Git Commit and
+#             the experiment branch's frozen HEAD. Phase 2 executes
+#             exactly this commit (detached HEAD), never the branch's
+#             latest HEAD. Required.
 #   status  : exactly one of:
 #               pending  - code complete, smoke PASS, ready for training
 #               running  - being executed by the stage-2 executor

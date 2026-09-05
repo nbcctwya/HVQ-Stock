@@ -24,6 +24,9 @@
   与 base 的区别、smoke 状态。分支 README 属于实验分支自身，
   随实验代码一起提交到 exp 分支；但 `queue.yaml` 和 `records/`
   仍然只允许在 `main` 上修改。
+- 分支 README **不得记录自己的 Final Experiment Commit SHA**：
+  一个 commit 无法包含它自己的 hash（自引用问题）。Final SHA 只记录在
+  `main` 的 queue 与 record 中。
 - 因此实验代码与实验元数据严格分离：代码（含分支 README）在 exp 分支，
   队列与记录永远只在 `main`。
 
@@ -31,14 +34,20 @@
 
 **进入 queue 的实验 = immutable experiment。** 一个实验 ID 唯一对应：
 
-`代码版本（pinned commit）+ Stage 1 provenance + 固定执行协议 + 正式结果`
+`代码版本（Final Experiment Commit）+ Stage 1 provenance + 固定执行协议 + 正式结果`
 
-- queue 条目的 `commit` 字段记录实验进入 queue 时的最终代码 commit
-  （完整 sha）。Phase 2 执行器只 checkout 该 pinned commit，
-  而不是实验分支的最新 HEAD。
-- 实验进入 queue 后，其代码与 queue 条目（除 `status` 外）一律不得再
-  修改。如果实验逻辑需要改变，必须创建新的实验 ID（新分支、新 record、
-  新 queue 条目），不得修改已有实验。
+- 每个实验只有**一个**正式代码版本：**Final Experiment Commit**
+  （开发完成、tests PASS、smoke PASS 后在实验分支上提交的最终 commit，
+  见第 5 节的收尾流程）。`queue.commit`、record `## Git` 的 `Commit`、
+  实验分支冻结时的 HEAD 三者必须是同一个完整 sha。
+- 不存在"开发 commit / queue pinned commit"两个正式版本的概念。
+  （001/002/003 的 record 保留了历史上多 commit 的说明，属历史记录；
+  新实验只认单一 Final Experiment Commit。）
+- Phase 2 执行器只 checkout queue 中 pin 的 Final Experiment Commit
+  （detached HEAD），而不是实验分支的最新 HEAD。
+- Final Experiment Commit 产生后，实验分支冻结：代码与 queue 条目
+  （除 `status` 外）一律不得再修改。如果实验逻辑需要改变，必须创建
+  新的实验 ID（新分支、新 record、新 queue 条目），不得修改已有实验。
 
 ## 创建一个新实验的流程
 
@@ -113,6 +122,10 @@
     checkpoint（例如 PRISM-VQ 原始 Stage 1 checkpoint）。相对路径相对于
     repo 根目录解析；文件必须存在且非空，否则执行器报错并将实验标记为
     failed，绝不偷偷改为重新训练 Stage 1。
+    注意：`artifacts/` 下的 checkpoint 只是**当前 local workspace** 内的
+    副本——`artifacts/` 被 gitignore，普通 `git clone` 不会获得这些文件；
+    缺失时执行器同样 loud fail，由使用者按 record 中的 provenance
+    说明重新放置文件。
 - 只修改 Stage 2 的实验（例如只改预测头或融合方式、Stage 1 完全不变），
   应显式复用 exact Stage 1 checkpoint，保证 controlled experiment 并
   节省 GPU 时间。
@@ -122,8 +135,14 @@
   划分和本实验完全一致（checkpoint 可以 strict 加载到本实验的 Stage 1
   模型）。
 - 执行器复用 `"<ID>"` 来源时从 `artifacts/<source_id>/run/.stage1.done`
-  读取精确的 Stage 1 checkpoint，验证其存在且非空；验证失败必须报错并
-  把实验标记为 failed，不允许偷偷改为重新训练 Stage 1。
+  读取精确的 Stage 1 checkpoint，并验证两件事：
+  1. checkpoint 存在且非空；
+  2. source marker 记录的 `commit` 等于 source 实验在 canonical queue
+     （main 上的 queue）中的 pinned commit——即 source 的 Stage 1 产物
+     确实产生于它自己的 Final Experiment Commit。
+  任一验证失败（marker 缺 commit、commit 不匹配、checkpoint 缺失）都必须
+  报错并把实验标记为 failed；不允许继续复用，也不允许偷偷改为重新训练
+  Stage 1。
 
 ### 4. 开发与验证（在实验分支上）
 
@@ -131,22 +150,40 @@
 - smoke test 失败时继续修复；修复前不允许进入下一步，
   更不允许加入 queue。
 
-### 5. 收尾（严格按顺序执行）
+### 5. 收尾（Final Experiment Commit 流程，严格按顺序执行）
 
-1. 在实验分支上 commit 实验代码（仅代码改动）。**这是该实验的最终
-   代码版本；其完整 commit sha 将被 pin 进 queue，之后不得再修改。**
-2. 切回 `main`。
-3. 在 `main` 上按 `templates/experiment.template.md` 创建
+固定顺序：`开发完成 → tests PASS → smoke PASS → 提交 Final Experiment
+Commit → 获取 HEAD SHA → 冻结实验分支 → 切回 main → 用该 SHA 写入
+queue 和 record`。
+
+1. 确认开发完成：单元测试 PASS、最小 smoke test PASS。
+   失败则回到第 4 步（开发与验证）继续修复；修复前不允许进入下一步，
+   更不允许加入 queue。
+2. 确认实验分支工作区 clean（`git status --porcelain` 无未提交改动；
+   artifact、数据 symlink 等未跟踪路径除外）。
+3. 在实验分支上提交 **Final Experiment Commit**（仅代码改动）。
+   从这一刻起实验分支**冻结**，不得再有任何提交；实验逻辑如需变化，
+   必须创建新的实验 ID。
+4. 获取该 commit 的完整 SHA：`git rev-parse HEAD`。这就是该实验唯一的
+   正式代码版本。
+5. 切回 `main`。
+6. 在 `main` 上按 `templates/experiment.template.md` 创建
    `experiments/records/<ID>-<name>.md`，填写 Idea、Motivation、
    Modification、Constraints、Git（Base 填创建分支所用的 base，
-   Branch 填 exp 分支名，Commit 填实验分支上的最终代码 commit hash）、
-   Smoke Test。Result 保持 `Status: PENDING`，Conclusion 留空。
-4. 在 `main` 上向 `experiments/queue.yaml` 追加该实验
-   （按 id 顺序，追加到末尾），初始状态必须为 `pending`，并且必须填写
-   `commit` 字段（与 record 中 Git Commit 一致的完整 sha；执行器只执行
-   该 pinned commit，而不是分支最新 HEAD）。需要复用 Stage 1 时同时填写
-   `stage1_source`（以及 external 形式下的 `stage1_ckpt`）。
-5. 在 `main` 上 commit record + queue 的变更。
+   Branch 填 exp 分支名，Commit 填第 4 步的完整 SHA）、Smoke Test。
+   Result 保持 `Status: PENDING`，Conclusion 留空。
+7. 在 `main` 上向 `experiments/queue.yaml` 追加该实验（按 id 顺序追加到
+   末尾），初始状态必须为 `pending`，`commit` 填第 4 步的同一个完整
+   SHA。需要复用 Stage 1 时同时填写 `stage1_source`（以及 external
+   形式下的 `stage1_ckpt`）。
+8. **入队一致性校验（必须全部通过才算入队完成）**：
+   - tests PASS、smoke PASS（第 1 步已确认）；
+   - exp 分支工作区 clean；
+   - `git rev-parse exp/<ID>-<name>` == 第 4 步的 Final Experiment
+     Commit（分支在冻结后没有被意外移动）；
+   - `queue.commit` == record `## Git` 的 `Commit` == 分支冻结 HEAD，
+     三者是完全相同的完整 sha。
+9. 在 `main` 上 commit record + queue 的变更。
 
 ### 6. 边界
 
@@ -163,8 +200,9 @@
   `.stage1.done` / `.stage2.done` / `.backtest.done` marker 自动续跑，
   不得因此清空 artifact 或从头执行。`done` 永远跳过；`failed` 只有在
   显式指定（`--only <ID>`）时才允许重试。
-- 执行时 checkout queue 条目 pin 的 `commit`（detached HEAD），而不是
-  实验分支的最新 HEAD；完成后回到 `main` 更新元数据。
+- 执行时 checkout queue 条目 pin 的 Final Experiment Commit
+  （detached HEAD），而不是实验分支的最新 HEAD；完成后回到 `main`
+  更新元数据。
 - 执行器负责在 `main` 上补充记录中的 Result 部分，并将 queue
   状态更新为 `done` 或 `failed`；必要时填写 Conclusion。
 - 执行器不创建新实验、不修改实验代码、不改动 ID 与命名。

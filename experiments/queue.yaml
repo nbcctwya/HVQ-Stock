@@ -16,7 +16,9 @@
 #     name: market-gated-z1              # kebab-case
 #     base: main                         # base branch (default main)
 #     branch: exp/004-market-gated-z1
-#     commit: <full sha>                 # pinned experiment commit; Phase 2
+#     commit: <full sha>                 # Final Experiment Commit; must equal
+#                                        # the record's Git Commit and the
+#                                        # branch's frozen HEAD. Phase 2
 #                                        # executes exactly this commit,
 #                                        # never the branch's latest HEAD
 #     status: pending
@@ -44,8 +46,10 @@ experiments:
     stage1_source: external
     # Corrected-baseline exact Stage 1 (PRISM-VQ original single-VQ512,
     # seed 42); the controlled fixed-vs-gated comparison shares this
-    # checkpoint with the baseline. Self-contained copy inside this repo
-    # (byte-identical to the PRISM-VQ original, md5 6b9d9dbf).
+    # checkpoint with the baseline. Byte-identical copy of the PRISM-VQ
+    # original (md5 6b9d9dbf), self-contained within the CURRENT LOCAL
+    # WORKSPACE only: artifacts/ is gitignored, so a plain git clone does
+    # NOT contain this file — the runner fails loudly when it is missing.
     stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
   - id: "003"
     name: hvq-z0-only

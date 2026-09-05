@@ -58,8 +58,10 @@ Queue pinned commit: 726836e19d2ceaed1863b5e17732e364ecb64574
 （实验代码 1d16627 + 公共 correctness fix 726836e；Phase 2 只执行该 pinned commit）
 Stage 1 provenance: external（queue `stage1_source: external`，
 `stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt`，
-即 corrected baseline 的 exact Stage 1 checkpoint；repo 内自包含副本，
-与 PRISM-VQ 原始文件逐字节一致，md5 6b9d9dbf）
+即 corrected baseline 的 exact Stage 1 checkpoint；与 PRISM-VQ 原始文件
+逐字节一致，md5 6b9d9dbf。注意：该副本仅在**当前 local workspace** 内
+自包含——`artifacts/` 被 gitignore，普通 `git clone` 不包含此文件；
+文件缺失时执行器 loud fail，需按本 provenance 说明重新放置。）
 
 ## Smoke Test
 

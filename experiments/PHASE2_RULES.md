@@ -15,8 +15,8 @@ Phase 2 是**固定、确定性、可恢复的正式实验执行阶段**。
 Phase 2 对 queue 中每个符合条件的实验执行固定流程：
 
 1. 按 ID 顺序消费 `pending` 与 `running` 实验；
-2. checkout queue 条目 pin 的 `commit`（detached HEAD）——不是实验分支的
-   最新 HEAD；分支在入队后即使发生变化也不影响已入队实验；
+2. checkout queue 条目 pin 的 Final Experiment Commit（detached HEAD）——
+   不是实验分支的最新 HEAD；分支在入队后即使发生变化也不影响已入队实验；
 3. Stage 1（或按 `stage1_source` 复用实验 / external exact checkpoint）→
    Stage 2（seed 0）→ prediction / metrics → Qlib backtest；
 4. 收集 metrics（IC/ICIR/RankIC/RankICIR 与回测指标）；
@@ -116,6 +116,12 @@ Hydra 命令构造错误、多个实验都会遇到的公共执行错误。
   - artifact 缺失或损坏。
 
   上一级失效必须级联失效其下游 marker（stage1 → stage2 → backtest）。
+- experiment→experiment 复用 Stage 1 时，执行器还必须验证 source
+  实验的 `.stage1.done` 记录的 commit 等于 source 实验在 canonical
+  queue（main 上的 queue，而非 detached experiment commit 上的 stale
+  副本）中的 pinned commit；source marker 缺 commit、commit 不匹配或
+  checkpoint 缺失/损坏时 loud fail——不允许继续复用，也不允许偷偷
+  重训 Stage 1。
 - retry / resume 时不得随意删除已有有效结果。
 - 出错时日志与现场是诊断依据，优先保留，不做清理。
 

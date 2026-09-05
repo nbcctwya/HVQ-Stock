@@ -668,5 +668,75 @@ class ExternalStage1Test(unittest.TestCase):
         self.assertEqual(prov["source_id"], "external")
 
 
+class Stage1SourceCommitValidationTest(unittest.TestCase):
+    """experiment→experiment reuse: the source stage1 marker's commit must
+    equal the source experiment's canonical queue pinned commit.
+
+    Queue metadata is passed in by the caller (run_experiment uses the
+    canonical queue read on main); a missing/mismatching commit or a
+    missing source entry must loud-fail — no reuse, no silent retrain.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp)
+        self.src_run = self.repo / "artifacts" / "001" / "run"
+        self.src_ckpt = make_ckpt(self.src_run, "hvq-epoch=5-val_loss=0.4592.ckpt")
+        self.run_dir = self.repo / "artifacts" / "010" / "run"
+        self.run_dir.mkdir(parents=True)
+        self.exp = {"id": "010", "stage1_source": "001"}
+        self.queue_by_id = {"001": {"id": "001", "commit": "SRC_FINAL_SHA"}}
+        # Any training attempt is a test failure.
+        orig = runner.run_with_retries
+        runner.run_with_retries = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("stage1 must never retrain for a reuse experiment")
+        )
+        self.addCleanup(setattr, runner, "run_with_retries", orig)
+
+    def _write_src_marker(self, text):
+        (self.src_run / ".stage1.done").write_text(text)
+
+    def test_matching_source_commit_reuses(self):
+        self._write_src_marker(
+            f"best={self.src_ckpt.name}\nval_loss=0.4592\ncommit=SRC_FINAL_SHA\n"
+        )
+        ckpt, prov = runner.stage1(self.repo, self.run_dir, self.exp, self.queue_by_id)
+        self.assertEqual(ckpt, self.src_ckpt.resolve())
+        self.assertEqual(prov["mode"], "reused")
+        self.assertEqual(prov["source_id"], "001")
+
+    def test_source_marker_missing_commit_loud_fails(self):
+        self._write_src_marker(f"best={self.src_ckpt.name}\nval_loss=0.4592\n")
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, self.exp, self.queue_by_id)
+        self.assertFalse((self.run_dir / ".stage1.done").exists())
+
+    def test_source_marker_commit_mismatch_loud_fails(self):
+        self._write_src_marker(
+            f"best={self.src_ckpt.name}\nval_loss=0.4592\ncommit=OTHER_SHA\n"
+        )
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, self.exp, self.queue_by_id)
+        self.assertFalse((self.run_dir / ".stage1.done").exists())
+
+    def test_source_queue_entry_missing_commit_loud_fails(self):
+        self._write_src_marker(
+            f"best={self.src_ckpt.name}\nval_loss=0.4592\ncommit=SRC_FINAL_SHA\n"
+        )
+        with self.assertRaises(runner.StageError):
+            runner.stage1(
+                self.repo, self.run_dir, self.exp, {"001": {"id": "001"}}
+            )
+        self.assertFalse((self.run_dir / ".stage1.done").exists())
+
+    def test_source_missing_from_queue_metadata_loud_fails(self):
+        self._write_src_marker(
+            f"best={self.src_ckpt.name}\nval_loss=0.4592\ncommit=SRC_FINAL_SHA\n"
+        )
+        with self.assertRaises(runner.StageError):
+            runner.stage1(self.repo, self.run_dir, self.exp, {})
+        self.assertFalse((self.run_dir / ".stage1.done").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
