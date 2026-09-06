@@ -86,3 +86,10 @@ experiments:
     commit: feed430d9e8a2c13157424583b3f6870ea28cfb9
     status: pending
     stage1_source: self
+  - id: "008"
+    name: alphamaster-prior-factor-head
+    base: exp/007-alphamaster-baseline
+    branch: exp/008-alphamaster-prior-factor-head
+    commit: 82fa0a49c0c2227eba851829a12fec9aace2037a
+    status: pending
+    stage1_source: self
