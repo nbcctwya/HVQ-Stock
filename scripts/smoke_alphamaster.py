@@ -100,32 +100,99 @@ def verify_inputs(data_root):
         model = AlphaMasterModule(config).eval()
         if model.master.feature_gate.t != beta:
             raise AssertionError(f"unexpected {universe} beta")
-        prediction = model(parts.stock_feature, parts.market_feature)
+        prediction, alpha, loadings, prior_contribution, hidden = model(
+            parts.stock_feature,
+            parts.market_feature,
+            parts.prior_factor,
+            return_components=True,
+        )
+        if parts.prior_factor.shape != (4, 13):
+            raise AssertionError("canonical prior_factor is not [N,13]")
+        if alpha.shape != (4,) or loadings.shape != (4, 13):
+            raise AssertionError("prior-factor head output shape mismatch")
+        if prediction.shape != (4,):
+            raise AssertionError("prediction shape mismatch")
+        torch.testing.assert_close(
+            prior_contribution,
+            torch.sum(loadings * parts.prior_factor, dim=-1),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            prediction,
+            alpha + torch.sum(loadings * parts.prior_factor, dim=-1),
+            rtol=0,
+            atol=0,
+        )
 
         changed_prior = batch.clone()
         changed_prior[..., GROUP_SLICES["prior"]] += 123456
         changed_parts = unpack_batch(changed_prior)
-        prediction_changed_prior = model(
-            changed_parts.stock_feature, changed_parts.market_feature
+        changed_output = model(
+            changed_parts.stock_feature,
+            changed_parts.market_feature,
+            changed_parts.prior_factor,
+            return_components=True,
         )
-        if not torch.equal(prediction, prediction_changed_prior):
-            raise AssertionError("prior13 changed AlphaMaster prediction")
+        prediction_changed_prior, new_alpha, new_loadings, _, new_hidden = changed_output
+        if torch.equal(prediction, prediction_changed_prior):
+            raise AssertionError("prior13 did not affect final prediction")
+        for expected, actual in (
+            (hidden, new_hidden), (alpha, new_alpha), (loadings, new_loadings)
+        ):
+            torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+
+        repeated = model(
+            parts.stock_feature,
+            parts.market_feature,
+            parts.prior_factor,
+            return_components=True,
+        )
+        for expected, actual in zip(
+            (prediction, alpha, loadings, prior_contribution, hidden), repeated
+        ):
+            torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+        if torch.equal(loadings[0], loadings[1]):
+            raise AssertionError("prior loadings are not dynamically sample-dependent")
+        torch.testing.assert_close(
+            loadings,
+            model.master.prior_loading_head(hidden),
+            rtol=0,
+            atol=0,
+        )
 
         changed_market = parts.market_feature.clone()
         changed_market[:, -1, 0] += 100
-        if torch.equal(prediction, model(parts.stock_feature, changed_market)):
+        if torch.equal(
+            prediction,
+            model(parts.stock_feature, changed_market, parts.prior_factor),
+        ):
             raise AssertionError("market63 did not affect AlphaMaster prediction")
         if len(set(dates[positions])) != 1:
             raise AssertionError("smoke batch spans multiple trading days")
         results[universe] = {
             "input_shape": list(batch.shape),
             "stock_shape": list(parts.stock_feature.shape),
+            "prior_shape": list(parts.prior_factor.shape),
             "market_shape": list(parts.market_feature.shape),
             "prediction_shape": list(prediction.shape),
+            "alpha_shape": list(alpha.shape),
+            "prior_loading_shape": list(loadings.shape),
             "beta": beta,
-            "prior_invariant": True,
+            "factor_formula_exact": True,
+            "prior_sensitive": True,
+            "prior_backbone_isolated": True,
+            "deterministic_forward": True,
+            "dynamic_loadings": True,
             "market_sensitive": True,
             "single_day_cross_section": True,
+            "diagnostics": {
+                "alpha_mean": alpha.mean().item(),
+                "prior_contribution_mean": prior_contribution.mean().item(),
+                "prior_loading_mean": loadings.mean().item(),
+                "prior_loading_std": loadings.std().item(),
+                "prior_loading_abs_mean": loadings.abs().mean().item(),
+            },
         }
     return results
 
@@ -133,7 +200,7 @@ def verify_inputs(data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/007/smoke",
+        "--output-dir", default="artifacts/008/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()

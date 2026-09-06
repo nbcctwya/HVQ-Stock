@@ -1,10 +1,11 @@
-# Pure AlphaMaster baseline under the HVQ canonical dataset and protocol.
+# AlphaMaster prior-factor-head experiment under the canonical protocol.
 # artifact_root is an execution-layer override used by experiments/runner.py.
 artifact_root: null
 
 alphamaster:
   d_feat: 158
   d_market: 63
+  num_prior_factors: 13
   d_model: 256
   t_nhead: 4
   s_nhead: 2

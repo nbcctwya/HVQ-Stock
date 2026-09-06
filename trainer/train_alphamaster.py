@@ -7,13 +7,13 @@ import pandas as pd
 import pytorch_lightning as pl
 import torch
 
-from dataset.schema import MARKET_DIM, STOCK_DIM, unpack_batch
+from dataset.schema import MARKET_DIM, PRIOR_DIM, STOCK_DIM, unpack_batch
 from module.alphamaster import MASTER
 from utils.test import Cal_IC_IR
 
 
 class AlphaMasterModule(pl.LightningModule):
-    """Pure AlphaMaster with only canonical stock and market inputs."""
+    """AlphaMaster with priors isolated to its final factor head."""
 
     def __init__(self, config):
         super().__init__()
@@ -24,11 +24,17 @@ class AlphaMasterModule(pl.LightningModule):
 
         self.stock_dim = model_cfg["d_feat"]
         self.market_dim = model_cfg["d_market"]
+        self.prior_dim = model_cfg["num_prior_factors"]
         self.target_day = config["predictor"]["target_day"]
-        if self.stock_dim != STOCK_DIM or self.market_dim != MARKET_DIM:
+        if (
+            self.stock_dim != STOCK_DIM
+            or self.market_dim != MARKET_DIM
+            or self.prior_dim != PRIOR_DIM
+        ):
             raise ValueError(
-                f"AlphaMaster requires canonical stock{STOCK_DIM}/market{MARKET_DIM}, "
-                f"got stock{self.stock_dim}/market{self.market_dim}"
+                "AlphaMaster requires canonical "
+                f"stock{STOCK_DIM}/prior{PRIOR_DIM}/market{MARKET_DIM}, got "
+                f"stock{self.stock_dim}/prior{self.prior_dim}/market{self.market_dim}"
             )
 
         self.master = MASTER(
@@ -41,24 +47,33 @@ class AlphaMasterModule(pl.LightningModule):
             gate_input_start_index=self.stock_dim,
             gate_input_end_index=self.stock_dim + self.market_dim,
             beta=beta,
+            num_prior_factors=self.prior_dim,
         )
 
-    def forward(self, stock_feature, market_feature):
+    def forward(
+        self, stock_feature, market_feature, prior_factor,
+        return_components=False,
+    ):
         if stock_feature.shape[:-1] != market_feature.shape[:-1]:
             raise ValueError("stock and market tensors must share [N,T]")
         if stock_feature.shape[-1] != self.stock_dim:
             raise ValueError(f"Expected {self.stock_dim} stock features")
         if market_feature.shape[-1] != self.market_dim:
             raise ValueError(f"Expected {self.market_dim} market features")
-        return self.master(torch.cat([stock_feature, market_feature], dim=-1))
+        if prior_factor.shape != (stock_feature.shape[0], self.prior_dim):
+            raise ValueError(f"Expected prior_factor shape [N,{self.prior_dim}]")
+        backbone_input = torch.cat([stock_feature, market_feature], dim=-1)
+        return self.master(
+            backbone_input, prior_factor,
+            return_components=return_components,
+        )
 
     def _get_data(self, batch, batch_idx=0):
         parts = unpack_batch(batch.float())
-        # prior_factor is intentionally not returned: pure AlphaMaster has no
-        # prior input, parameter, fusion path, or auxiliary loss.
         return (
             parts.stock_feature,
             parts.market_feature,
+            parts.prior_factor,
             parts.target(self.target_day),
         )
 
@@ -70,8 +85,8 @@ class AlphaMasterModule(pl.LightningModule):
         return torch.mean((prediction[mask] - target[mask]) ** 2)
 
     def training_step(self, batch, batch_idx):
-        stock, market, target = self._get_data(batch, batch_idx)
-        loss = self.loss_fn(self(stock, market), target)
+        stock, market, prior, target = self._get_data(batch, batch_idx)
+        loss = self.loss_fn(self(stock, market, prior), target)
         self.log(
             "train_loss", loss, on_step=True, on_epoch=True,
             logger=True, sync_dist=True, batch_size=target.numel(),
@@ -79,8 +94,8 @@ class AlphaMasterModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        stock, market, target = self._get_data(batch, batch_idx)
-        loss = self.loss_fn(self(stock, market), target)
+        stock, market, prior, target = self._get_data(batch, batch_idx)
+        loss = self.loss_fn(self(stock, market, prior), target)
         self.log(
             "val_loss", loss, on_step=False, on_epoch=True,
             logger=True, sync_dist=True, batch_size=target.numel(),
@@ -113,8 +128,8 @@ def run_alphamaster_inference(model, data_loader, device=None):
     targets = []
     for batch in data_loader:
         batch = batch.float().to(device)
-        stock, market, target = model._get_data(batch)
-        predictions.append(model(stock, market).detach().cpu().numpy())
+        stock, market, prior, target = model._get_data(batch)
+        predictions.append(model(stock, market, prior).detach().cpu().numpy())
         targets.append(target.detach().cpu().numpy())
 
     positions = data_loader.batch_sampler.ordered_indices()

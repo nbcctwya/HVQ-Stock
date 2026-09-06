@@ -1,4 +1,4 @@
-"""Stage 1: train pure AlphaMaster and save its validation-best checkpoint."""
+"""Stage 1: train AlphaMaster prior-factor head and save its best checkpoint."""
 
 import pickle
 from pathlib import Path

@@ -1,8 +1,8 @@
-"""AlphaMaster architecture adapted from the standalone AlphaMaster repository.
+"""AlphaMaster backbone with a dynamic prior-factor prediction head.
 
-The mathematical model is kept intact.  HVQ's canonical adapter supplies the
-same concatenated ``[stock158, market63]`` tensor that the original MASTER
-forward method expects; data preparation and training live outside this file.
+HVQ's canonical adapter supplies the unchanged ``[stock158, market63]``
+backbone input.  The canonical prior factors enter only after the original
+AlphaMaster temporal representation has been computed.
 """
 
 import math
@@ -180,6 +180,7 @@ class MASTER(nn.Module):
         gate_input_start_index=158,
         gate_input_end_index=221,
         beta=None,
+        num_prior_factors=13,
     ):
         super().__init__()
         self.gate_input_start_index = gate_input_start_index
@@ -196,9 +197,12 @@ class MASTER(nn.Module):
             d_model=d_model, nhead=s_nhead, dropout=S_dropout_rate
         )
         self.temporalatten = TemporalAttention(d_model=d_model)
-        self.decoder = nn.Linear(d_model, 1)
+        self.num_prior_factors = num_prior_factors
+        self.alpha_head = nn.Linear(d_model, 1)
+        self.prior_loading_head = nn.Linear(d_model, num_prior_factors)
 
-    def forward(self, x):
+    def encode(self, x):
+        """Return the unchanged AlphaMaster hidden representation."""
         src = x[:, :, :self.gate_input_start_index]
         gate_input = x[
             :, -1, self.gate_input_start_index:self.gate_input_end_index
@@ -209,5 +213,21 @@ class MASTER(nn.Module):
         x = self.pe(x)
         x = self.tatten(x)
         x = self.satten(x)
-        x = self.temporalatten(x)
-        return self.decoder(x).squeeze(-1)
+        return self.temporalatten(x)
+
+    def forward(self, x, prior_factor, return_components=False):
+        if prior_factor.ndim != 2 or prior_factor.shape != (
+            x.shape[0], self.num_prior_factors
+        ):
+            raise ValueError(
+                "prior_factor must have shape "
+                f"[N,{self.num_prior_factors}], got {tuple(prior_factor.shape)}"
+            )
+        hidden = self.encode(x)
+        alpha = self.alpha_head(hidden).squeeze(-1)
+        beta = self.prior_loading_head(hidden)
+        prior_contribution = torch.sum(beta * prior_factor, dim=-1)
+        prediction = alpha + prior_contribution
+        if return_components:
+            return prediction, alpha, beta, prior_contribution, hidden
+        return prediction
