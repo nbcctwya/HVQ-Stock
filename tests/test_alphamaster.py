@@ -1,4 +1,4 @@
-"""Pure AlphaMaster architecture and canonical adapter tests."""
+"""Temporal-market AlphaMaster architecture and canonical adapter tests."""
 
 import importlib.util
 import tempfile
@@ -40,12 +40,19 @@ class IndexedTensorDataset(torch.utils.data.Dataset):
         return self.index
 
 
+class LastSnapshot(torch.nn.Module):
+    """007 market-state behavior, used only to verify backbone equivalence."""
+
+    def forward(self, market_history):
+        return market_history[:, -1, :]
+
+
 class AlphaMasterTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(7)
         self.batch = torch.randn(6, 20, TOTAL_DIM)
 
-    def test_default_config_is_pure_alphamaster(self):
+    def test_default_config_is_temporal_market_alphamaster(self):
         config = load_config()
         self.assertEqual(config["train"]["seed"], 0)
         self.assertEqual(config["train"]["learning_rate"], 8e-6)
@@ -59,6 +66,12 @@ class AlphaMasterTest(unittest.TestCase):
             "s_nhead": 2,
             "T_dropout_rate": 0.5,
             "S_dropout_rate": 0.5,
+            "market_encoder": {
+                "type": "gru",
+                "input_size": 63,
+                "hidden_size": 63,
+                "num_layers": 1,
+            },
             "beta": {"csi300": 10, "sp500": 5},
         })
 
@@ -81,7 +94,54 @@ class AlphaMasterTest(unittest.TestCase):
         changed_market = market.clone()
         changed_market[:, -1, 0] += 100
         self.assertFalse(torch.equal(prediction, model(stock, changed_market)))
+
+        changed_history = market.clone()
+        changed_history[:, :-1, 0] += 100
+        torch.testing.assert_close(
+            changed_history[:, -1, :], market[:, -1, :], rtol=0, atol=0
+        )
+        self.assertFalse(torch.equal(prediction, model(stock, changed_history)))
         self.assertEqual(prediction.shape, (6,))
+
+    def test_temporal_encoder_gate_contract_stock_path_and_gradients(self):
+        model = AlphaMasterModule(load_config()).eval()
+        stock, market, _ = model._get_data(self.batch)
+        encoder = model.master.market_encoder
+        self.assertEqual(encoder.gru.input_size, 63)
+        self.assertEqual(encoder.gru.hidden_size, 63)
+        self.assertEqual(encoder.gru.num_layers, 1)
+        self.assertFalse(encoder.gru.bidirectional)
+
+        market_state = encoder(market)
+        self.assertEqual(market_state.shape, (6, 63))
+        captured = {}
+
+        def capture_gate(module, args):
+            captured["gate_input"] = args[0].detach().clone()
+
+        def capture_projection(module, args):
+            captured["projection_input"] = args[0].detach().clone()
+
+        gate_handle = model.master.feature_gate.register_forward_pre_hook(capture_gate)
+        projection_handle = model.master.x2y.register_forward_pre_hook(capture_projection)
+        prediction = model(stock, market)
+        gate_handle.remove()
+        projection_handle.remove()
+        self.assertEqual(captured["gate_input"].shape, (6, 63))
+        torch.testing.assert_close(captured["gate_input"], market_state)
+        expected_stock = stock * model.master.feature_gate(market_state).unsqueeze(1)
+        torch.testing.assert_close(captured["projection_input"], expected_stock)
+        self.assertEqual(prediction.shape, (6,))
+
+        model.train()
+        model.zero_grad(set_to_none=True)
+        model(stock, market).square().mean().backward()
+        encoder_parameters = list(model.master.market_encoder.named_parameters())
+        self.assertTrue(encoder_parameters)
+        for name, parameter in encoder_parameters:
+            with self.subTest(parameter=name):
+                self.assertIsNotNone(parameter.grad)
+                self.assertGreater(parameter.grad.abs().sum().item(), 0)
 
     def test_csi300_and_sp500_forward_with_expected_beta(self):
         for universe, beta in (("csi300", 10), ("sp500", 5)):
@@ -127,6 +187,14 @@ class AlphaMasterTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 AlphaMasterModule.load_strict_checkpoint(path, config)
 
+            legacy_state = {
+                name: value for name, value in model.state_dict().items()
+                if not name.startswith("master.market_encoder.")
+            }
+            torch.save({"state_dict": legacy_state}, path)
+            with self.assertRaises(RuntimeError):
+                AlphaMasterModule.load_strict_checkpoint(path, config)
+
     def test_core_forward_matches_standalone_alphamaster(self):
         source = ROOT.parent / "AlphaMaster" / "src" / "alphamaster" / "model.py"
         if not source.is_file():
@@ -137,6 +205,7 @@ class AlphaMasterTest(unittest.TestCase):
 
         reference = standalone.MASTER(beta=10).eval()
         adapted = MASTER(beta=10).eval()
+        adapted.market_encoder = LastSnapshot()
         adapted.load_state_dict(reference.state_dict(), strict=True)
         features = torch.randn(5, 20, 221)
         torch.testing.assert_close(

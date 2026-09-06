@@ -13,7 +13,7 @@ from utils.test import Cal_IC_IR
 
 
 class AlphaMasterModule(pl.LightningModule):
-    """Pure AlphaMaster with only canonical stock and market inputs."""
+    """AlphaMaster with canonical stock and temporally encoded market inputs."""
 
     def __init__(self, config):
         super().__init__()
@@ -21,6 +21,9 @@ class AlphaMasterModule(pl.LightningModule):
         model_cfg = config["alphamaster"]
         universe = config["data"]["universe"]
         beta = model_cfg["beta"][universe]
+        market_encoder_cfg = model_cfg["market_encoder"]
+        if market_encoder_cfg["type"] != "gru":
+            raise ValueError("AlphaMaster temporal market encoder must be 'gru'")
 
         self.stock_dim = model_cfg["d_feat"]
         self.market_dim = model_cfg["d_market"]
@@ -41,6 +44,9 @@ class AlphaMasterModule(pl.LightningModule):
             gate_input_start_index=self.stock_dim,
             gate_input_end_index=self.stock_dim + self.market_dim,
             beta=beta,
+            market_encoder_input_size=market_encoder_cfg["input_size"],
+            market_encoder_hidden_size=market_encoder_cfg["hidden_size"],
+            market_encoder_num_layers=market_encoder_cfg["num_layers"],
         )
 
     def forward(self, stock_feature, market_feature):

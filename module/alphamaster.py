@@ -1,8 +1,8 @@
-"""AlphaMaster architecture adapted from the standalone AlphaMaster repository.
+"""AlphaMaster architecture with a temporal market-state encoder.
 
-The mathematical model is kept intact.  HVQ's canonical adapter supplies the
-same concatenated ``[stock158, market63]`` tensor that the original MASTER
-forward method expects; data preparation and training live outside this file.
+The AlphaMaster backbone is kept intact.  The only experiment change is that
+the feature gate receives the last hidden state of a lightweight GRU over the
+full market history instead of the final-day market snapshot.
 """
 
 import math
@@ -155,6 +155,24 @@ class Gate(nn.Module):
         return self.d_output * output
 
 
+class TemporalMarketEncoder(nn.Module):
+    """Encode a ``[N,T,63]`` market window as one 63-dimensional state."""
+
+    def __init__(self, input_size=63, hidden_size=63, num_layers=1):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=False,
+        )
+
+    def forward(self, market_history):
+        _, last_hidden = self.gru(market_history)
+        return last_hidden[-1]
+
+
 class TemporalAttention(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -180,11 +198,23 @@ class MASTER(nn.Module):
         gate_input_start_index=158,
         gate_input_end_index=221,
         beta=None,
+        market_encoder_input_size=63,
+        market_encoder_hidden_size=63,
+        market_encoder_num_layers=1,
     ):
         super().__init__()
         self.gate_input_start_index = gate_input_start_index
         self.gate_input_end_index = gate_input_end_index
         self.d_gate_input = gate_input_end_index - gate_input_start_index
+        if market_encoder_input_size != self.d_gate_input:
+            raise ValueError("Market encoder input must match gate input width")
+        if market_encoder_hidden_size != self.d_gate_input:
+            raise ValueError("Market encoder output must match gate input width")
+        self.market_encoder = TemporalMarketEncoder(
+            input_size=market_encoder_input_size,
+            hidden_size=market_encoder_hidden_size,
+            num_layers=market_encoder_num_layers,
+        )
         self.feature_gate = Gate(self.d_gate_input, d_feat, beta=beta)
 
         self.x2y = nn.Linear(d_feat, d_model)
@@ -200,10 +230,11 @@ class MASTER(nn.Module):
 
     def forward(self, x):
         src = x[:, :, :self.gate_input_start_index]
-        gate_input = x[
-            :, -1, self.gate_input_start_index:self.gate_input_end_index
+        market_history = x[
+            :, :, self.gate_input_start_index:self.gate_input_end_index
         ]
-        src = src * torch.unsqueeze(self.feature_gate(gate_input), dim=1)
+        market_state = self.market_encoder(market_history)
+        src = src * torch.unsqueeze(self.feature_gate(market_state), dim=1)
 
         x = self.x2y(src)
         x = self.pe(x)

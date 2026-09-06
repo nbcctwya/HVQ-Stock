@@ -100,7 +100,18 @@ def verify_inputs(data_root):
         model = AlphaMasterModule(config).eval()
         if model.master.feature_gate.t != beta:
             raise AssertionError(f"unexpected {universe} beta")
+        market_state = model.master.market_encoder(parts.market_feature)
+        if market_state.shape != (len(positions), 63):
+            raise AssertionError("temporal market encoder output is not [N,63]")
+        captured_gate_input = []
+        handle = model.master.feature_gate.register_forward_pre_hook(
+            lambda module, args: captured_gate_input.append(args[0].detach().clone())
+        )
         prediction = model(parts.stock_feature, parts.market_feature)
+        handle.remove()
+        if captured_gate_input[0].shape != (len(positions), 63):
+            raise AssertionError("Feature Gate did not receive a 63-d market state")
+        torch.testing.assert_close(captured_gate_input[0], market_state)
 
         changed_prior = batch.clone()
         changed_prior[..., GROUP_SLICES["prior"]] += 123456
@@ -115,6 +126,25 @@ def verify_inputs(data_root):
         changed_market[:, -1, 0] += 100
         if torch.equal(prediction, model(parts.stock_feature, changed_market)):
             raise AssertionError("market63 did not affect AlphaMaster prediction")
+
+        changed_history = parts.market_feature.clone()
+        changed_history[:, :-1, 0] += 100
+        if not torch.equal(
+            changed_history[:, -1, :], parts.market_feature[:, -1, :]
+        ):
+            raise AssertionError("history test changed the final market day")
+        if torch.equal(prediction, model(parts.stock_feature, changed_history)):
+            raise AssertionError("pre-final market history did not affect prediction")
+
+        model.train()
+        model.zero_grad(set_to_none=True)
+        model(parts.stock_feature, parts.market_feature).square().mean().backward()
+        encoder_gradients = {
+            name: parameter.grad is not None and parameter.grad.abs().sum().item() > 0
+            for name, parameter in model.master.market_encoder.named_parameters()
+        }
+        if not encoder_gradients or not all(encoder_gradients.values()):
+            raise AssertionError("temporal market encoder parameters lack gradients")
         if len(set(dates[positions])) != 1:
             raise AssertionError("smoke batch spans multiple trading days")
         results[universe] = {
@@ -125,6 +155,10 @@ def verify_inputs(data_root):
             "beta": beta,
             "prior_invariant": True,
             "market_sensitive": True,
+            "earlier_market_history_sensitive_with_last_day_fixed": True,
+            "market_state_shape": list(market_state.shape),
+            "feature_gate_input_shape": list(captured_gate_input[0].shape),
+            "market_encoder_gradients": encoder_gradients,
             "single_day_cross_section": True,
         }
     return results
@@ -133,7 +167,7 @@ def verify_inputs(data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/007/smoke",
+        "--output-dir", default="artifacts/009/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()

@@ -1,64 +1,81 @@
-# 007 — AlphaMaster Baseline
+# 009 — AlphaMaster Temporal Market
 
 ## Base
 
-`main`
+`exp/007-alphamaster-baseline`
 
 ## Idea / Motivation
 
-This experiment is **AlphaMaster under HVQ canonical dataset and unified
-experiment protocol**. It establishes a pure AlphaMaster baseline inside the
-current HVQ research pipeline so later experiments can build on AlphaMaster
-without introducing a second data or evaluation convention.
+AlphaMaster 007 conditions its Market-Guided Feature Gate on only the final
+trading day's 63-dimensional market snapshot. This experiment tests whether a
+lightweight temporal encoder can extract a more informative and stable market
+state from the complete canonical 20-day market trajectory.
 
-This experiment is AlphaMaster under the HVQ canonical dataset and unified
-evaluation protocol, not a bitwise reproduction of the standalone
-AlphaMaster repository's historical run.
+This experiment answers only:
+
+> Is temporal market history more suitable than a single-day market snapshot
+> as the market-state input to AlphaMaster's Feature Gate?
 
 ## Core modification
 
-The HVQ/VQ two-stage model is replaced by the standalone AlphaMaster model's
-core sequence:
+The sole model change is the market-state calculation immediately before the
+existing Feature Gate:
 
 ```text
-Market-Guided Feature Gate
+007:
+market_state = market[:, -1, :]
+
+009:
+market_state = GRU(market[:, :, :]).last_hidden
+
+Both:
+market_state
+→ original AlphaMaster Feature Gate
+→ unchanged AlphaMaster backbone
+```
+
+The temporal market encoder is a batch-first, one-layer, unidirectional GRU
+with `input_size=63` and `hidden_size=63`. It has no attention, residual,
+projection, auxiliary loss, or additional market features. Its final hidden
+state is exactly `[N,63]`, preserving the original Feature Gate's input width
+and mathematical structure.
+
+The complete path is:
+
+```text
+canonical market [N,20,63]
+→ GRU(63→63, one layer, unidirectional)
+→ final hidden market_state [N,63]
+→ original Gate(63→158, beta=10 CSI300 / 5 SP500)
+→ stock158 feature reweighting
 → Linear projection
 → Positional Encoding
 → TAttention
 → SAttention
 → TemporalAttention
-→ prediction
+→ original decoder
+→ prediction [N]
 ```
-
-`Gate`, `PositionalEncoding`, `TAttention`, `SAttention`,
-`TemporalAttention`, and `MASTER` are adapted directly from the sibling
-AlphaMaster repository. Formal defaults remain faithful to that implementation:
-`d_feat=158`, `d_model=256`, temporal heads 4, spatial heads 2, both dropout
-rates 0.5, Adam learning rate `8e-6`, and market-gate beta 10 for CSI300 / 5
-for SP500.
 
 ## Difference from base
 
-- The single experimental variable is replacing the current HVQ architecture
-  with pure AlphaMaster.
-- The canonical `[N,20,244]` batch is parsed into stock158, prior13, market63,
-  and future-return10 using the existing schema. AlphaMaster consumes only
-  stock158 and market63; prior13 is completely unused.
-- The market63 channel remains the already-generated canonical channel:
-  CSI300 uses `sh000300`, `sh000852`, `sh000905`; SP500 uses `^gspc`, `^dji`,
-  `^ndx`. No AlphaMaster-specific dataset is created.
-- Stage 1 is AlphaMaster training at fixed seed 42 with validation-best
-  checkpointing. Stage 2 strictly loads that checkpoint, performs unified
-  test inference at protocol seed 0, and writes `0_best.pkl` / `0_metric.csv`.
-- `backtest_qlib.py`, data splits, target day 5, metrics, and the fixed
-  Top30/Drop5 backtest protocol are unchanged.
+- Only `market[:, -1, :]` is replaced by the GRU final hidden state as the
+  Feature Gate input.
+- The Feature Gate, stock158 path, projection, all attention blocks, decoder,
+  optimizer, target, metrics, data splits, seed protocol, training budget, and
+  backtest protocol remain those of 007.
+- The canonical schema remains stock158 + prior13 + market63 + return10 at
+  `T=20`; prior13 remains completely unused.
+- Stage 1 provenance is `self`: the new trainable GRU changes parameters and
+  the forward graph, so a 007 Stage 1 checkpoint is not strict-compatible.
 
 ## Smoke status
 
-PASS. The smoke run covers canonical parsing, stock/market dimensions,
-prior invariance, market sensitivity, same-day cross-sectional batching,
-CSI300 and SP500 forwards, one-epoch limited Stage 1 training, runner checkpoint
-discovery, strict Stage 2 checkpoint loading, output discovery, and prediction
-normalization by the existing backtest adapter.
+PASS. Unit and entry-level smoke tests cover canonical parsing, both universes,
+the 63-dimensional encoder/gate contract, unchanged stock path, prior
+invariance, sensitivity to only the first 19 market days while the final day is
+fixed, encoder gradients, same-day cross-sectional batching, validation-best
+checkpoint discovery, strict Stage 2 loading, standard prediction artifacts,
+and compatibility with the existing backtest normalizer.
 
-Artifacts and logs are isolated under `artifacts/007/smoke/`.
+Artifacts and logs are isolated under `artifacts/009/smoke/`.
