@@ -93,3 +93,10 @@ experiments:
     commit: 82fa0a49c0c2227eba851829a12fec9aace2037a
     status: pending
     stage1_source: self
+  - id: "009"
+    name: alphamaster-temporal-market
+    base: exp/007-alphamaster-baseline
+    branch: exp/009-alphamaster-temporal-market
+    commit: db5128fedd751b4de03b981760f39138717ec37c
+    status: pending
+    stage1_source: self
