@@ -136,3 +136,65 @@ Turnover: 0.3283
 Phase 2 固定执行器完成正式训练、预测与回测（pinned commit b2af82df73f63d9387681876017d5fd9e7e678f7）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
 
 产物：`artifacts/006/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+
+## Post-hoc Diagnosis
+
+Diagnosis date: 2026-09-06
+Execution: read-only diagnosis; no retraining / no backtest
+（自正式 test prediction `0_best.pkl`（含 `score` / `score_main` /
+`delta` / `label`）恢复并复算；`score == score_main + delta` 逐位成立，
+全部指标与 `0_metric.csv` 逐位一致。）
+
+- test samples = 217909
+- test trading days = 727
+
+### Main vs Final
+
+| Metric   | main `ŷ0` | final `ŷ0+Δŷ` |  Change |
+| -------- | --------: | ------------: | ------: |
+| IC       |    0.0339 |        0.0321 | -0.0018 |
+| ICIR     |    0.1786 |        0.1720 | -0.0066 |
+| RankIC   |    0.0539 |        0.0517 | -0.0022 |
+| RankICIR |    0.2754 |        0.2680 | -0.0074 |
+
+Delta statistics：
+
+- Delta_mean = 0.00057
+- Delta_std = 0.0208
+- Delta_abs_mean = 0.0163
+- final score std ≈ 0.0989
+
+关键相关性（Δŷ vs 真实 residual `r = y - ŷ0`）：
+
+- Corr_delta_resid = -0.072475
+- RankCorr_delta_resid = -0.0686
+- daily Pearson mean ≈ -0.0507（仅约 32.5% 交易日 daily Pearson > 0）
+- daily Spearman mean ≈ -0.0434（约 34.1% 交易日 daily Spearman > 0）
+- delta 对 label 的逐日 RankIC 均值约 -0.0009（纯噪声水平）
+
+其他诊断：
+
+- top60 local RankIC：final 0.0264 vs main 0.0291
+- bottom60 local RankIC：final 0.0331 vs main 0.0371
+- delta 每天约更换 top30 中 16% 的股票
+- 被换入样本 `|delta|` ≈ 0.0286（全体平均 `|delta|` ≈ 0.0163，约 1.75 倍）
+- corr(delta, score_main) ≈ +0.081（delta 轻微放大而非压缩主路径极端值）
+- corr(score_main_006, score_003) ≈ 0.957（006 主路径 ≈ 003，消融受控成立）
+
+### 结论
+
+- 006 的 prediction-residual hypothesis 在 seed 0 下不被支持；
+- Δŷ 与真实 residual `y - ŷ0` 为负相关——residual branch 在 test 上
+  不仅没有学到残差，方向反而系统性相反；
+- final IC / RankIC 均低于 main（IC -0.0018，RankIC -0.0022）；
+- z1 residual branch 没有表现出 z0 之外的增量预测价值；
+- 006 的组合表现虽然优于 003（AR 14.04% vs 11.23%，Sharpe 0.9454 vs
+  0.7651，MDD -11.64% vs -12.64%），但不能解释为 residual correction
+  成功；
+- 当前证据不支持"普遍改善排序""关键股票修正""压缩极端值降风险"这些
+  机制解释（top60/bottom60 local RankIC 均变差，delta 不压缩极端值，
+  top30 换手未提升任何可测排序质量）；
+- 更合理的态度是把组合改善视为单 seed 下尚未解释、需要多 seed 验证的
+  现象，而不是方法成功。
+
+跨实验综合解读见 `experiments/analysis/z1-utilization-001-006.md`。

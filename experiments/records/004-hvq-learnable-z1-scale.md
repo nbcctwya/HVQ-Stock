@@ -117,3 +117,34 @@ Turnover: 0.3297
 Phase 2 固定执行器完成正式训练、预测与回测（pinned commit f8b782c9e95c05b27a15e8c433e48efb12df5c59）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
 
 产物：`artifacts/004/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+
+## Post-hoc Diagnosis
+
+Diagnosis date: 2026-09-06
+Execution: read-only diagnosis; no retraining / no backtest
+（α 自 best checkpoint `state_dict['z1_scale_raw']` 恢复，与
+`artifacts/004/run/stage2.log` 及 wandb 离线记录交叉验证一致。）
+
+### α 轨迹
+
+- α_init = 0.952574（a = 3.0）
+- best checkpoint epoch = 5
+- best α = 0.945776（best `z1_scale_raw` = 2.858892）
+- final α = 0.941589（final raw a = 2.780062）
+- wandb 可恢复轨迹总体单调下降（0.952574 → … → 0.947217，已恢复段内无回升）
+- α 从初始化到 best 仅变化约 -0.0068
+- α 从初始化到训练结束仅变化约 -0.0110（相对变化约 1.2%）
+
+### 结论
+
+- 没有证据支持 α 会趋近 0（不支持"z1 应被整体抑制"）；
+- 学到的 α 始终接近 1（全程停留在 0.94–0.95 区间）；
+- 004 的 IC / RankIC 与 001 基本一致（IC 0.0351 vs 0.0352，
+  RankIC 0.0506 vs 0.0506），与 α≈1 时 004 退化为 001 的预期一致；
+- 当前实验不支持"global learnable scalar 可以有效改善 z1 利用方式"——
+  α 全训练过程仅移动约 0.01，未能在 001（α=1）与 003（α=0）之间找到
+  有实际意义的中间工作点。注意这不等价于"global scalar 已被证明学不会
+  最优权重"：训练目标并不直接优化 test RankIC / Sharpe / MDD，且
+  sigmoid 初始化本身也限制了大幅移动。
+
+跨实验综合解读见 `experiments/analysis/z1-utilization-001-006.md`。

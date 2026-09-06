@@ -128,3 +128,55 @@ Turnover: 0.3274
 Phase 2 固定执行器完成正式训练、预测与回测（pinned commit a232f93d479fa746a0239252edcdcdfd70df7d8a）。Stage 1 复用实验 001 的正式 checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/001/run/checkpoints/hvq_csi300_full-epoch=5-val_loss=0.4592.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
 
 产物：`artifacts/005/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
+
+## Post-hoc Diagnosis
+
+Diagnosis date: 2026-09-06
+Execution: read-only diagnosis; no retraining / no backtest
+（在 pinned commit `a232f93d` 的临时 worktree 中对 best checkpoint 做
+完整 validation 集只读前向诊断；统计与 `artifacts/005/run/stage2.log`
+官方记录逐位一致，交叉验证通过。）
+
+- best checkpoint epoch = 4
+- validation samples = 145145
+
+### best checkpoint 在完整 validation 集上的 gate 分布
+
+| mean | std | min | p1 | p5 | p10 | p25 | median | p75 | p90 | p95 | p99 | max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.916905 | 0.042620 | 0.721620 | 0.7958 | 0.8351 | 0.8571 | 0.8920 | 0.9244 | 0.9504 | 0.9648 | 0.9716 | 0.9802 | 0.9873 |
+
+其他诊断：
+
+- 25.4% 样本 gate > 0.95；1.29% 样本 gate < 0.8；没有样本 gate < 0.5
+- last validation epoch：std = 0.0903，min = 0.4253（离散度随训练持续扩大）
+- gate bias = 2.880537，|W| = 0.547314（weight 从全零初始化学出非零值）
+
+### gate 与表示统计的相关性
+
+| Variable | Pearson | Spearman |
+| -------- | ------: | -------: |
+| `\|\|z0\|\|` | -0.345 | -0.282 |
+| `\|\|z1\|\| / (\|\|z0\|\| + eps)` | +0.205 | +0.185 |
+| `\|\|z1\|\|` | -0.020 | -0.034 |
+| 一级残差范数 `\|\|h - z0\|\|` | +0.015 | +0.016 |
+| 总量化误差 `\|\|h - z0 - z1\|\|` | +0.021 | +0.017 |
+
+### 结论
+
+- gate 没有退化成常数（std 0.0426，训练末 0.0903）；
+- 存在真实但温和的 sample-wise heterogeneity（分布左偏压缩在高位，
+  中位数 0.924，无样本接近 0）；
+- 005 相对 004 确实学到了 sample-wise differentiation（均值 0.917
+  低于 004 的全局 α=0.946，且从 std=0 的初始化学出了非零离散度）；
+- 但 gate 几乎不响应 quantization error / reconstruction residual
+  （相关系数 ≈0.02）；
+- gate 最明显的关联是 `||z0||`（负相关）与 z1 相对幅度（正相关），
+  因此当前机制更像 representation magnitude rebalancing，而不是可靠
+  识别"哪些样本 z1 有预测信息"；
+- 005 的 AR / Sharpe / Calmar 很强（16.11% / 1.0237 / 1.2208，为本研究
+  线最优），但 RankIC 没有改善（0.0488，低于 001/003/004）；
+- 当前只有 Stage 2 seed 0，因此组合层面优势只能视为值得复核的
+  research signal，不能写成稳定结论。
+
+跨实验综合解读见 `experiments/analysis/z1-utilization-001-006.md`。

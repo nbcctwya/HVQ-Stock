@@ -70,3 +70,24 @@ IC 略低（0.0333 vs 0.0352）、AR 略低（11.23% vs 13.69%）。
   `uncontrolled_stage1/`（corrected 但 Stage 1 实例不同）与
   `pre_fix/`（修复前））
 - 003：`artifacts/003/run/`（pre-fix 备份在 `pre_fix/`）
+
+## Later experiments: 004–006
+
+（2026-09-06 追加；同一 corrected 协议、同一 Stage 2 seed 0、同一回测
+协议，003/004/005/006 均复用 001 的 exact Stage 1 checkpoint。）
+
+| Model | IC | ICIR | RankIC | RankICIR | Annual Return | Excess | Sharpe | Sortino | MDD | Calmar | Turnover |
+| ----- | -: | ---: | -----: | -------: | ------------: | -----: | -----: | ------: | --: | -----: | -------: |
+| 004 hvq-learnable-z1-scale (z0+α·z1) | 0.0351 | 0.2163 | 0.0506 | 0.3166 | 12.15% | 5.75% | 0.6778 | 1.0312 | -19.33% | 0.6286 | 0.3297 |
+| 005 hvq-samplewise-z1-gate (z0+g_i·z1) | 0.0329 | 0.1908 | 0.0488 | 0.2794 | 16.11% | 9.71% | 1.0237 | 1.5858 | -13.20% | 1.2208 | 0.3274 |
+| 006 hvq-predictive-residual-z1 (ŷ0+Δŷ) | 0.0321 | 0.1720 | 0.0517 | 0.2680 | 14.04% | 7.64% | 0.9454 | 1.3863 | -11.64% | 1.2059 | 0.3283 |
+
+004–006 是 z1 利用方式研究线（z1 research line）的后续实验：004 全局
+可学习 α 维持在 ≈0.95（行为≈001）；005 sample-wise gate 组合指标为本
+研究线最优但 RankIC 无增益；006 prediction-residual branch 在 test 上
+失败（Δŷ 与真实 residual 负相关）。各实验的专项只读诊断见对应 record
+的 `## Post-hoc Diagnosis` 章节；跨实验假设评估与后续研究决策见
+`experiments/analysis/z1-utilization-001-006.md`。
+
+产物位置：`artifacts/004/run/`、`artifacts/005/run/`、
+`artifacts/006/run/`。
