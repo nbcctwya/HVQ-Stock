@@ -1,3 +1,4 @@
+from dataset.schema import dataset_location
 from pathlib import Path
 from typing import List, Optional
 
@@ -159,16 +160,15 @@ def _prepare_dataset(cfg: DictConfig,
                      region_code: str,
                      universe_prefix: str,
                      data_handler_config: dict):
-    data_path = _resolve_data_path(cfg.data.get('data_path'))
-    pred_horizon = cfg.vqvae.predictor.pred_len
-    window_size = cfg.data.window_size
+    root, base = dataset_location(cfg.data, universe_prefix, cfg.vqvae.predictor.pred_len)
+    data_path = _resolve_data_path(root)
 
     if not data_path:
         raise ValueError("data.data_path is not configured. Set it in config.yaml.")
     
     expected_files = {
-        'train': data_path / region_code / f"{universe_prefix}_{window_size}_h{pred_horizon}_dl2_train.pkl",
-        'valid': data_path / region_code / f"{universe_prefix}_{window_size}_h{pred_horizon}_dl2_valid.pkl",
+        'train': data_path / region_code / f"{base}_train.pkl",
+        'valid': data_path / region_code / f"{base}_valid.pkl",
     }
     
     missing = [str(p) for p in expected_files.values() if not p.exists()]

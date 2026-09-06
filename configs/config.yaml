@@ -42,7 +42,9 @@ vqvae:
 
 data:
   universe: 'csi300'
-  data_path: 'dataset/data'
+  data_path: 'dataset/data'  # legacy v1 input; never overwritten
+  schema_version: 2
+  schema_v2_path: 'dataset/schema_v2_data'
   window_size: 20
   step: 1
   train_period : ["2009-01-01", "2020-12-31"]  # 12 years

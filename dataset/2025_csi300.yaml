@@ -4,6 +4,18 @@ qlib_init:
 market: &market csi300
 benchmark: &benchmark SH000300
 
+# Independent market group; AlphaMaster formulas and preprocessing.
+market_data_handler_config:
+  market_indices: ["sh000300", "sh000852", "sh000905"]
+  infer_processors:
+    - class: RobustZScoreNorm
+      kwargs:
+        fields_group: market
+        clip_outlier: true
+    - class: Fillna
+      kwargs:
+        fields_group: market
+
 data_handler_config: &data_handler_config
   start_time: 2008-01-01
   end_time: 2025-12-31

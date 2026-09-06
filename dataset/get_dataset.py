@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Sampler
 from qlib.data.dataset.utils import get_level_index
 
-sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 PROJECT_ROOT = Path(__file__).absolute().resolve().parent.parent.parent
 sys.path.append(str(PROJECT_ROOT))
@@ -85,7 +85,11 @@ def load_args():
     parser.add_argument('--config', type=str, help="Path to the config data file.",
                         default=get_root_dir().joinpath('configs', 'config.yaml'))
     parser.add_argument('--data_handler_config', type=str, help="Path to the data handler config file.",
-                        default=get_root_dir().joinpath('dataset', '2025_csi300.yaml'))
+                        default=None)
+    parser.add_argument('--source-dir', type=Path, default=get_root_dir() / 'dataset/data',
+                        help="Read-only v1 sampler directory for CSI300/SP500 migration.")
+    parser.add_argument('--output-dir', type=Path, default=get_root_dir() / 'dataset/schema_v2_data',
+                        help="New v2 output directory for CSI300/SP500.")
     parser.add_argument('--universe', type=str, help="Market universe (csi300 or sp500 or csi500)",
                         default="csi300")
     return parser.parse_args()
@@ -119,6 +123,11 @@ def resolve_provider_uri(config: dict, fallback: str) -> str:
 if __name__ == "__main__":
     args = load_args()
     print(args)
+    # Main's supported universes migrate to v2; historical CSI500 stays below.
+    if args.universe in ("csi300", "sp500"):
+        from dataset.prepare_schema_v2 import prepare
+        prepare(args.universe, args.source_dir, args.output_dir, args.data_handler_config)
+        sys.exit(0)
     window = 20
 
     if args.universe == "csi300":

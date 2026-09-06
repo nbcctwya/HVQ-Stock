@@ -1,3 +1,4 @@
+from dataset.schema import dataset_location
 import os
 import shutil
 import tempfile
@@ -306,10 +307,8 @@ def _resolve_universe(universe: str) -> Tuple[str, str]:
 def _prepare_dataloaders(cfg: DictConfig,
                          region_code: str,
                          universe_prefix: str):
-    data_path = _resolve_data_path(cfg.data.get('data_path'))
-    horizon = cfg.vqvae.predictor.pred_len
-    window_size = cfg.data.window_size
-    base = f"{universe_prefix}_{window_size}_h{horizon}_dl2"
+    root, base = dataset_location(cfg.data, universe_prefix, cfg.vqvae.predictor.pred_len)
+    data_path = _resolve_data_path(root)
 
     file_map = {
         'train': data_path / region_code / f"{base}_train.pkl",

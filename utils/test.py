@@ -1,3 +1,4 @@
+from dataset.schema import unpack_model_batch
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -57,11 +58,8 @@ def run_inference(model, data_loader, config, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    config_vq = config['vqvae']
     config_pred = config['predictor']
 
-    n_features = config_vq['num_features']
-    n_prior_factors = config_vq['num_prior_factors']
     target_index = config_pred['target_day'] - 1 # ex. 5 -> 4 (start from 0)
 
     model.eval()
@@ -76,14 +74,13 @@ def run_inference(model, data_loader, config, device=None):
     test_index_sorted = test_index.sortlevel(0)[0]
     
     for batch_idx, batch in enumerate(tqdm(data_loader, desc="Running Inference")):
-        batch = batch.squeeze(0)
         batch = batch.float()
         batch = batch.to(device)
 
-        feature = batch[:, :, 0:n_features] # (300, 20, 158)
-        prior_factor = batch[:, -1, n_features : n_features+n_prior_factors] # (300, 13)
-        future_returns = batch[:, -1, n_features+n_prior_factors: ] # (300, 10)
-        label = future_returns[:, target_index] # (300, 1)
+        parts = unpack_model_batch(batch, config)
+        feature, prior_factor, market_feature, future_returns = parts
+        # market_feature is deliberately unused by the current baseline.
+        label = parts.target(target_index + 1)
 
         # wo_prior ablation drops prior_factor.
         if hasattr(model, 'num_prior_factors') and hasattr(model, 'return_predictor') and not model.return_predictor.use_prior:

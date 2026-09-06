@@ -1,3 +1,4 @@
+from dataset.schema import unpack_model_batch
 import os
 import random
 import torch
@@ -38,12 +39,10 @@ class FactorVQVAE(pl.LightningModule):
         return recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)
     
     def _get_data(self, batch, batch_idx):
-        batch   = batch.squeeze(0)
         batch   = batch.float()
-        feature = batch[:, :, 0:self._alpha_n] # (300, 20, 158)
-        prior_factor = batch[:, -1, self._alpha_n : self._alpha_n+self.n_prior_factors] # (300, 13)
-        future_returns = batch[:, -1, self._alpha_n+self.n_prior_factors  : ] # (300, 1, 10)
-        future_returns = future_returns.squeeze(-1) # (300, 10)
+        parts = unpack_model_batch(batch, self.config)
+        feature, prior_factor, market_feature, future_returns = parts
+        # market_feature is deliberately unused by the current baseline.
         
         return feature, prior_factor, future_returns # (B, T, C), (B, P), (B, 10)
     

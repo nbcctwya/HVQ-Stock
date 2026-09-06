@@ -1,3 +1,4 @@
+from dataset.schema import unpack_model_batch
 import os
 import random
 import torch
@@ -152,13 +153,11 @@ class GenerateReturn(pl.LightningModule):
         return [optimizer], [sch_config]
 
     def _get_data(self, batch, batch_idx):
-        batch   = batch.squeeze(0)
         batch   = batch.float()
-        feature = batch[:, :, 0:self.n_features]
-        prior_factor = batch[:, -1, self.n_features : self.n_features+self.n_prior_factors]
-        future_returns = batch[:, -1, self.n_features+self.n_prior_factors  : ]
-        future_returns = future_returns.squeeze(-1)
-        label = future_returns[:, self.target_index]
+        parts = unpack_model_batch(batch, self.config)
+        feature, prior_factor, market_feature, future_returns = parts
+        # market_feature is deliberately unused by the current baseline.
+        label = parts.target(self.target_index + 1)
         return feature, prior_factor, label
 
     def forward(self, feature, prior_factor):

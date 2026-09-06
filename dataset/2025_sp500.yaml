@@ -4,6 +4,18 @@ qlib_init:
 market: &market sp500
 benchmark: &benchmark ^gspc
 
+# Independent market group; AlphaMaster formulas and preprocessing.
+market_data_handler_config:
+  market_indices: ["^gspc", "^dji", "^ndx"]
+  infer_processors:
+    - class: RobustZScoreNorm
+      kwargs:
+        fields_group: market
+        clip_outlier: true
+    - class: Fillna
+      kwargs:
+        fields_group: market
+
 data_handler_config: &data_handler_config
   start_time: 2008-01-01
   end_time: 2025-12-31

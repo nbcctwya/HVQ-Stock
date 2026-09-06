@@ -11,6 +11,22 @@
 
 This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
 
+## Dataset schema on main
+
+Schema v1 (`158 stock + 13 prior + 10 future returns`, 181 dimensions) remains
+the data format for experiments **001–006**. Their branches, records and old
+`*_dl2_*.pkl` files are unchanged.
+
+Schema v2 (`158 stock + 13 prior + 63 market + 10 future returns`, 244 dimensions)
+is the default for **main and future experiments**, for **CSI300 and SP500 only**.
+CSI300 uses CN market63 (`sh000300`, `sh000852`, `sh000905`); SP500 uses US
+market63 (`^gspc`, `^dji`, `^ndx`). Market remains separate from the 158-dimensional
+stock `feature` group. The current baseline parses market63 but does not use it;
+this channel supplies infrastructure for later market-aware experiments.
+
+See [dataset/README.md](dataset/README.md) for the layout, non-overwriting v1→v2
+migration, new filenames, parser, and read-only validation commands.
+
 ## Baseline Results Protocol v1.0
 
 The repository includes a non-invasive adapter that evaluates the existing
