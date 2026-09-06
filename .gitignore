@@ -2,7 +2,7 @@ checkpoints/
 res/
 results/
 artifacts/
-dataset/data/
+dataset/jkpdata/
 __pycache__/
 *.pyc
 lightning_logs/

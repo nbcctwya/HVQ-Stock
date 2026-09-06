@@ -103,7 +103,7 @@ python -m dataset.get_dataset --universe sp500
 
 `python dataset/get_dataset.py` accepts the same arguments. Inputs are the
 Qlib providers configured in `dataset/2025_{csi300,sp500}.yaml` and the raw
-JKP CSVs under `dataset/data/`:
+JKP CSVs under `dataset/jkpdata/`:
 
 - `[chn]_[all_themes]_[daily]_[vw_cap].csv`
 - `[usa]_[all_themes]_[daily]_[vw_cap].csv`
@@ -126,9 +126,9 @@ dataset/processed/US/sp500_20_h10_test.pkl
 Stage1 and Stage2 read only these names under `data.data_path/{CN,US}`.
 There is no alternate path, version switch or filename fallback. If generating
 elsewhere, set `data.data_path` to that output directory when running the model.
-The separate output directory avoids writes through the locally shared
-`dataset/data` symlink. Pickles are reproducible artifacts and ignored by Git.
-Older artifact files are neither read nor maintained by main.
+The separate output directory keeps generated pickles away from the raw JKP
+inputs in `dataset/jkpdata/`. Pickles are reproducible artifacts and ignored by
+Git. Older artifact files are neither read nor maintained by main.
 
 ## Validate without training
 

@@ -103,7 +103,7 @@ def default_output_dir():
 
 def default_jkp_path(universe):
     location = {"csi300": "chn", "sp500": "usa"}[universe]
-    return ROOT / "dataset/data" / f"[{location}]_[all_themes]_[daily]_[vw_cap].csv"
+    return ROOT / "dataset/jkpdata" / f"[{location}]_[all_themes]_[daily]_[vw_cap].csv"
 
 
 def build_handler(config, jkp_path):

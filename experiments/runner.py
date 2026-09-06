@@ -125,8 +125,8 @@ def commit_main(repo: Path, message: str) -> None:
 
 
 def ensure_clean(repo: Path) -> None:
-    # Only tracked modifications block a checkout; untracked paths such as the
-    # dataset/data symlink or ignored outputs/ survive branch switches fine.
+    # Only tracked modifications block a checkout; untracked or ignored paths
+    # such as dataset/jkpdata/ or outputs/ survive branch switches fine.
     status = git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip()
     if status:
         raise StageError(f"git worktree is dirty, refusing to checkout:\n{status}")

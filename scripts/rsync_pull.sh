@@ -28,7 +28,7 @@ Options:
   -p, --port PORT     SSH port.
   -n, --dry-run       Show what would be transferred without changing files.
       --delete        Delete local files in synced paths that do not exist remotely.
-      --include-data  Also pull dataset/data/.
+      --include-data  Also pull dataset/jkpdata/.
       --code          Pull remote code/configs instead of result directories.
       --all           Pull the whole remote project instead of result directories only.
       --skip-newer    Do not overwrite local files that are newer.
@@ -184,17 +184,17 @@ if [[ "${pull_all}" == false && "${pull_code}" == false ]]; then
   )
 
   if [[ "${include_data}" == true ]]; then
-    # Include the parent directory so rsync can descend into dataset/data.
+    # Include the parent directory so rsync can descend into dataset/jkpdata.
     include_opts+=(
       --include='/dataset/'
-      --include='/dataset/data/***'
+      --include='/dataset/jkpdata/***'
     )
   fi
 
   # After the wanted result paths are included, exclude everything else.
   include_opts+=(--exclude='*')
 elif [[ "${pull_code}" == true ]]; then
-  # Code pull mode excludes generated artifacts unless dataset/data is requested.
+  # Code pull mode excludes generated artifacts unless dataset/jkpdata is requested.
   include_opts=()
   exclude_opts+=(
     --exclude='checkpoints/'
@@ -204,7 +204,7 @@ elif [[ "${pull_code}" == true ]]; then
 
   if [[ "${include_data}" == false ]]; then
     exclude_opts+=(
-      --exclude='dataset/data/'
+      --exclude='dataset/jkpdata/'
     )
   fi
 else

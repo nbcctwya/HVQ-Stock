@@ -62,7 +62,7 @@ scripts/rsync_push.sh
 checkpoints/
 outputs/
 res/
-dataset/data/
+dataset/jkpdata/
 ```
 
 如果要推送到另一台服务器：
@@ -127,7 +127,7 @@ scripts/rsync_pull.sh --code
 checkpoints/
 outputs/
 res/
-dataset/data/
+dataset/jkpdata/
 ```
 
 如果本地也可能有更新，建议先预览：
@@ -156,17 +156,17 @@ scripts/rsync_pull.sh --all
 scripts/rsync_pull.sh --all --dry-run
 ```
 
-## 同步 dataset/data
+## 同步 dataset/jkpdata
 
-`dataset/data/` 默认不会被同步，因为其中通常包含生成好的训练 pickle、JKP CSV 或其他本地数据。
+`dataset/jkpdata/` 默认不会被同步，因为其中包含 JKP CSV 等本地数据文件。
 
-如果确实需要拉取远程 `dataset/data/`：
+如果确实需要拉取远程 `dataset/jkpdata/`：
 
 ```bash
 scripts/rsync_pull.sh --include-data
 ```
 
-如果需要推送本地 `dataset/data/`、`checkpoints/`、`outputs/` 和 `res/`：
+如果需要推送本地 `dataset/jkpdata/`、`checkpoints/`、`outputs/` 和 `res/`：
 
 ```bash
 scripts/rsync_push.sh --include-data
@@ -175,8 +175,8 @@ scripts/rsync_push.sh --include-data
 注意：`--include-data` 会同步所有默认排除的大目录，不只是 JKP CSV。只同步少量指定文件时，建议直接使用 `rsync` 命令，例如：
 
 ```bash
-rsync -avh dataset/data/[chn]_[all_themes]_[daily]_[vw_cap].csv \
-  autodl-2080ti-1:/root/autodl-tmp/PRISM-VQ/dataset/data/
+rsync -avh "dataset/jkpdata/[chn]_[all_themes]_[daily]_[vw_cap].csv" \
+  autodl-2080ti-1:/root/autodl-tmp/HVQ-Stock/dataset/jkpdata/
 ```
 
 ## 常用参数
@@ -185,7 +185,7 @@ rsync -avh dataset/data/[chn]_[all_themes]_[daily]_[vw_cap].csv \
 -n, --dry-run       预览将要同步的文件，不实际修改
 --delete            删除目标端多余文件，谨慎使用
 --skip-newer        跳过目标端更新时间更晚的文件
---include-data      同步 dataset/data 以及生成结果相关目录
+--include-data      同步 dataset/jkpdata 以及生成结果相关目录
 -p, --port PORT     临时指定 SSH 端口
 -h, --help          查看帮助
 ```

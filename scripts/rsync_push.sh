@@ -163,7 +163,7 @@ if [[ "${include_data}" == false ]]; then
     --exclude='checkpoints/'
     --exclude='outputs/'
     --exclude='res/'
-    --exclude='dataset/data/'
+    --exclude='dataset/jkpdata/'
   )
 fi
 
