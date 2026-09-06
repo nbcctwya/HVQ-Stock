@@ -40,6 +40,19 @@ class DailyBatchSamplerRandom(Sampler):
 
     def __len__(self):
         return len(self.daily_count) # len(self.data_source)
+
+    def ordered_indices(self):
+        """Positions emitted by non-shuffled daily cross-section batching."""
+        if self.shuffle:
+            raise ValueError("Ordered inference indices require shuffle=False")
+        datetime_level = self.index_df.names.index('datetime')
+        all_datetimes = self.index_df.get_level_values(datetime_level)
+        daily_indices = [
+            np.where(all_datetimes == date)[0] for date in self.dates
+        ]
+        if not daily_indices:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(daily_indices)
  
 
 def init_data_loader(handler, shuffle, num_workers=0, index=False):

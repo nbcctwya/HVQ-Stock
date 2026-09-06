@@ -1,115 +1,55 @@
-# Optional artifact isolation root (execution-layer parameter).
-# When set, e.g. `artifact_root=artifacts/002/run`, all run artifacts are
-# redirected under it: <artifact_root>/checkpoints (incl. wandb files) and
-# <artifact_root>/res (predictions/metrics). Stage 2 also resolves a relative
-# `predictor.saved_model` against the effective checkpoint dir, so it loads
-# Stage 1 checkpoints from the same artifact root.
-# null (default) keeps the original project-level checkpoints/ and res/.
+# Pure AlphaMaster baseline under the HVQ canonical dataset and protocol.
+# artifact_root is an execution-layer override used by experiments/runner.py.
 artifact_root: null
 
-vqvae:
-  num_features: 158
-  seq_len: 20 
-  hidden_size: 128     
-  num_prior_factors: 13  
-  vq_embed_dim: 128   
-  num_embed: 512    
-
-  encoder:
-    num_heads: 2 
-    num_layers: 1
-
-  quantizer:
-    decay: 0.95
-    commit_weight: 0.25
-    distance: 'l2'
-    anchor: 'probrandom'
-    first_batch: False
-    contras_loss: True
-
-  decoder:
-    norm_type: 'none'
-    num_groups: 8
-    hidden_channels: 128
-    initial_T: 5
-
-  predictor:
-    pred_len: 10 
-    num_gru_layers: 1
-    dropout: 0.1 
-    output_dim: 1
-    pred_weight: 0.0001
+alphamaster:
+  d_feat: 158
+  d_market: 63
+  d_model: 256
+  t_nhead: 4
+  s_nhead: 2
+  T_dropout_rate: 0.5
+  S_dropout_rate: 0.5
+  beta:
+    csi300: 10
+    sp500: 5
 
 data:
-  universe: 'csi300'
-  data_path: 'dataset/processed'
+  universe: csi300
+  data_path: dataset/processed
   window_size: 20
+  return_horizon: 10
   step: 1
-  train_period : ["2009-01-01", "2020-12-31"]  # 12 years
-  valid_period : ["2021-01-01", "2022-12-31"]  # 2 years
-  test_period  : ["2023-01-01", "2025-12-31"]  # 3 years
+  train_period: ["2009-01-01", "2020-12-31"]
+  valid_period: ["2021-01-01", "2022-12-31"]
+  test_period: ["2023-01-01", "2025-12-31"]
 
-stage2_presets:
-  csi300:
-    predictor:
-      saved_model: "infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=9-val_loss=0.5682.ckpt"
-      aux_weight: 0.01
-      n_expert: 2
-      transformer:
-        num_heads: 2
-  sp500:
-    predictor:
-      saved_model: "infusp500_h128_VQK512_C128_emb128_dl2p10_s42-epoch=1-val_loss=0.7590.ckpt"
-      aux_weight: 0.001
-      n_expert: 8
-      transformer:
-        num_heads: 4
-
-predictor: 
-  saved_model: "infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=9-val_loss=0.5682.ckpt"
-  num_features: 158
-  individual: False
-  aux_weight: 0.01
-
-  kernel_size: 3
-  k: ${half:${predictor.n_expert}} 
-  n_expert: 2
-  pred_len: 20  
-  moe_hidden: 64 
-  dropout: 0.1
-
-  transformer:
-    pe_kind: 'rope'
-    num_heads: 2
-    num_layers: 1
-    d_model: 64   
-    dim_feedforward: 128
-    dropout: 0.1 
-    batch_first: True
-    prepend_structure_token: True
- 
-  rank : 0
+predictor:
+  # "auto" supports direct stage1.py -> stage2.py use. The Phase 2 runner
+  # supplies the exact discovered Stage 1 checkpoint filename explicitly.
+  saved_model: auto
   target_day: 5
-  use_prior: True
-  aux_imp: 3
-  
+
 train:
-  seed: 0 # 
-  device: "cuda"
-  batch_size: 300 
-  learning_rate: 0.0001 
+  # Stage 1 remains fixed at seed 42 in stage1.py; Stage 2 uses protocol seed 0.
+  seed: 0
+  learning_rate: 0.000008
   num_epochs: 70
-  project_name: "PRISM-VQ"
-  run_name: "auto"
+  project_name: AlphaMaster
+  run_name: auto
+  accelerator: gpu
   gpu_counts: 1
-  precision: 32 
+  precision: 32
   num_workers: 4
-  gradient_clip_val: 1
-  save_dir: "checkpoints"
-  save_res: "res"
+  gradient_clip_val: 3.0
+  log_every_n_steps: 50
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  save_dir: checkpoints
+  save_res: res
   early_stopping:
-    monitor: "val_loss"
+    monitor: val_loss
     min_delta: 0.00001
     patience: 15
-    verbose: True
-    mode: "min"
+    verbose: true
+    mode: min

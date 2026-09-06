@@ -254,14 +254,11 @@ class GenerationTest(unittest.TestCase):
                 init.assert_not_called()
 
     def test_stage_readers_use_the_same_canonical_files(self):
-        # Importing the two standalone entrypoints together would register the
-        # same unrelated Hydra resolver twice. No model/trainer is constructed.
-        with mock.patch.object(OmegaConf, "register_new_resolver"):
-            stage1 = importlib.import_module("stage1")
-            stage2 = importlib.import_module("stage2")
+        stage1 = importlib.import_module("stage1")
+        stage2 = importlib.import_module("stage2")
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = OmegaConf.create({"data": {"data_path": tmp, "window_size": 20},
-                                    "vqvae": {"predictor": {"pred_len": 10}},
+            cfg = OmegaConf.create({"data": {"data_path": tmp, "window_size": 20,
+                                               "return_horizon": 10},
                                     "train": {"num_workers": 0}})
             for universe, region in (("csi300", "CN"), ("sp500", "US")):
                 frame, market = sample_frame(universe)
@@ -272,9 +269,9 @@ class GenerationTest(unittest.TestCase):
                         pickle.dump(sampler, stream)
                 first = stage1._load_canonical_datasets(cfg, region, universe)
                 self.assertTrue(all(dataset[0].shape == (20, 244) for dataset in first))
-                second = stage2._prepare_dataloaders(cfg, region, universe)
-                for loader in second[:3]:
-                    self.assertEqual(unpack_batch(next(iter(loader))).market_feature.shape[1:], (20, 63))
+                test_dataset = stage2._load_canonical_test_dataset(cfg, region, universe)
+                loader, _ = init_data_loader(test_dataset, shuffle=False)
+                self.assertEqual(unpack_batch(next(iter(loader))).market_feature.shape[1:], (20, 63))
 
 
 if __name__ == "__main__":
