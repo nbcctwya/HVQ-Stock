@@ -98,5 +98,5 @@ experiments:
     base: exp/007-alphamaster-baseline
     branch: exp/009-alphamaster-temporal-market
     commit: db5128fedd751b4de03b981760f39138717ec37c
-    status: running
+    status: done
     stage1_source: self

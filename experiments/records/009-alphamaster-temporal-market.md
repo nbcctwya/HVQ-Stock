@@ -70,19 +70,22 @@ PASS，生成 `artifacts/009/smoke/res/alphamaster_csi300/0_best.pkl` 与
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0393
+ICIR: 0.2108
+RankIC: 0.0603
+RankICIR: 0.3275
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 9.75%（基准 6.40%，超额 3.35%）
+Sharpe: 0.5762
+Sortino: 0.9044
+MDD: -26.93%
+Calmar: 0.3620
+Turnover: 0.3278
 
 ## Conclusion
 
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit db5128fedd751b4de03b981760f39138717ec37c）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=9-val_loss=0.9938.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/009/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
