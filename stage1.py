@@ -1,23 +1,19 @@
-from dataset.schema import dataset_basename
+import pickle
 from pathlib import Path
 from typing import List, Optional
 
 import hydra
-import pickle
 import pytorch_lightning as pl
-import qlib
 import torch
 from hydra.utils import instantiate, to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger
-from qlib.constant import REG_CN, REG_US
-from qlib.contrib.data.handler import Alpha158
-from qlib.data.dataset import DataHandlerLP, TSDatasetH
 
 from dataset.dataset import init_data_loader
+from dataset.schema import dataset_basename
 from trainer.train_vqvae import FactorVQVAE
-from utils import get_root_dir, load_yaml_param_settings, seed_everything, apply_artifact_root
+from utils import apply_artifact_root, get_root_dir, seed_everything
 from utils.wandb import make_wandb_config
 
 torch.set_float32_matmul_precision('high')
@@ -133,33 +129,15 @@ def train(cfg: DictConfig,
         experiment.finish()
 
 
-def get_region(region_code: str):
-    """Return the matching qlib region constant; defaults to REG_CN."""
-    region_map = {
-        'CN': REG_CN,
-        'US': REG_US,
-    }
-    return region_map.get(region_code, REG_CN)
-
-
-def _load_data_handler_config(cfg: DictConfig) -> dict:
-    default_path = Path(get_root_dir()) / "configs" / "data_handler_config.yaml"
-    cfg_path = cfg.data.get("handler_config_path", str(default_path))
-    abs_path = to_absolute_path(str(cfg_path))
-    config = load_yaml_param_settings(abs_path)
-    return config or {}
-
-
 def _resolve_data_path(path: Optional[str]) -> Optional[Path]:
     if not path:
         return None
     return Path(to_absolute_path(path))
 
 
-def _prepare_dataset(cfg: DictConfig,
-                     region_code: str,
-                     universe_prefix: str,
-                     data_handler_config: dict):
+def _load_canonical_datasets(cfg: DictConfig,
+                             region_code: str,
+                             universe_prefix: str):
     base = dataset_basename(universe_prefix, cfg.data.window_size, cfg.vqvae.predictor.pred_len)
     data_path = _resolve_data_path(cfg.data.get('data_path'))
 
@@ -192,8 +170,6 @@ def main(cfg: DictConfig) -> None:
     OmegaConf.set_readonly(frozen_cfg, True)
 
     config_dict = OmegaConf.to_container(frozen_cfg, resolve=True)
-    data_handler_config = _load_data_handler_config(frozen_cfg)
-
     fixed_seed = 42
     seed_everything(fixed_seed)
     pl.seed_everything(fixed_seed, workers=True)
@@ -212,7 +188,7 @@ def main(cfg: DictConfig) -> None:
     print(f"Region: {region_code}")
     print(f"Universe: {universe}")
 
-    train_prepare, valid_prepare = _prepare_dataset(frozen_cfg, region_code, universe_prefix, data_handler_config)
+    train_prepare, valid_prepare = _load_canonical_datasets(frozen_cfg, region_code, universe_prefix)
 
     num_workers = frozen_cfg.train.num_workers
     train_loader, num_batches_per_epoch_train = init_data_loader(train_prepare, shuffle=True, num_workers=num_workers)

@@ -270,7 +270,7 @@ class GenerationTest(unittest.TestCase):
                 for split in ("train", "valid", "test"):
                     with (Path(tmp) / region / f"{dataset_basename(universe)}_{split}.pkl").open("wb") as stream:
                         pickle.dump(sampler, stream)
-                first = stage1._prepare_dataset(cfg, region, universe, {})
+                first = stage1._load_canonical_datasets(cfg, region, universe)
                 self.assertTrue(all(dataset[0].shape == (20, 244) for dataset in first))
                 second = stage2._prepare_dataloaders(cfg, region, universe)
                 for loader in second[:3]:
