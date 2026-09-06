@@ -79,3 +79,10 @@ experiments:
     commit: b2af82df73f63d9387681876017d5fd9e7e678f7
     status: done
     stage1_source: "001"
+  - id: "007"
+    name: alphamaster-baseline
+    base: main
+    branch: exp/007-alphamaster-baseline
+    commit: feed430d9e8a2c13157424583b3f6870ea28cfb9
+    status: pending
+    stage1_source: self
