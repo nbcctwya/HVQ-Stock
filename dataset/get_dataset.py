@@ -1,98 +1,66 @@
+"""Generate the canonical CSI300/SP500 dataset directly from Qlib and JKP CSV."""
+
+import argparse
+import copy
+import gc
 import pickle
-import torch
-import pandas as pd
-import numpy as np
-import pprint as pp
-import os
-import yaml
-from argparse import ArgumentParser
-from qlib.data.dataset.handler import DataHandlerLP
-from qlib.tests.data import GetData
-from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
-from qlib.workflow import R
-from qlib.utils import init_instance_by_config
-from qlib.constant import REG_CN, REG_US
-import qlib
-from qlib.data import D
 import sys
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import qlib
+import yaml
 from qlib.contrib.data.handler import Alpha158
-from qlib.data.dataset.processor import RobustZScoreNorm, Fillna, DropnaLabel, CSRankNorm
-from qlib.data.dataset import TSDatasetH, DataHandlerLP
+from qlib.data import D
+from qlib.data.dataset.handler import DataHandlerLP
 from qlib.data.dataset.processor import Processor
-from torch.utils.data import DataLoader
-from torch.utils.data import Sampler
-from qlib.data.dataset.utils import get_level_index
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-PROJECT_ROOT = Path(__file__).absolute().resolve().parent.parent.parent
-sys.path.append(str(PROJECT_ROOT))
-
-
-def get_root_dir():
-    return Path(__file__).parent.parent
-
-
-def load_yaml_param_settings(yaml_fname: str):
-    """
-    :param yaml_fname: .yaml file that consists of hyper-parameter settings.
-    """
-    stream = open(yaml_fname, 'r')
-    config = yaml.load(stream, Loader=yaml.FullLoader)
-    return config
+from dataset.market import CanonicalSampler, load_market_frame
+from dataset.schema import (
+    GROUP_DIMS, MARKET_INDICES, PRIOR_DIM, RETURN_DIM, STEP_LEN,
+    dataset_basename, unpack_batch, validate_columns,
+)
 
 
 class GlobalFactorMerger(Processor):
-    """
-    Append `factor_mat` (rows: datetime, columns: factor) to a
-    (datetime, instrument) MultiIndex DataFrame by broadcasting along instruments.
-    """
+    """Broadcast a daily factor matrix across the stock instruments."""
 
-    def __init__(self, factor_mat: pd.DataFrame, fields_group: str = "prior"):
+    def __init__(self, factor_mat, fields_group):
         self.factor_mat = factor_mat
-        self.fg = fields_group
+        self.fields_group = fields_group
 
-    def __call__(self, df: pd.DataFrame):
-        # 1. Broadcast factor rows across instruments per datetime.
-        dt_index = df.index.get_level_values("datetime")
-        fac_block = self.factor_mat.loc[dt_index].values
-        repeat = int(len(df) / len(dt_index))
-        fac_block = np.repeat(fac_block, repeat, axis=0)
-
-        # 2. Wrap with the target MultiIndex columns.
-        fac_df = pd.DataFrame(
-            fac_block,
-            index=df.index,
-            columns=pd.MultiIndex.from_tuples(
-                [(self.fg, c) for c in self.factor_mat.columns]
-            ),
+    def __call__(self, df):
+        dates = df.index.get_level_values("datetime")
+        block = pd.DataFrame(
+            self.factor_mat.loc[dates].to_numpy(), index=df.index,
+            columns=pd.MultiIndex.from_product([[self.fields_group], self.factor_mat.columns]),
         )
-        return pd.concat([df, fac_df], axis=1)
+        return pd.concat([df, block], axis=1)
+
+
+class CanonicalGroups(Processor):
+    def __call__(self, df):
+        df = df.loc[:, list(GROUP_DIMS)]
+        validate_columns(df.columns)
+        return df
 
 
 class Alpha158WithJKP(Alpha158):
-    def __init__(self, jkp_factor_mat: pd.DataFrame, **kwargs):
-        gfm = GlobalFactorMerger(jkp_factor_mat, fields_group="prior")
+    """Keep HVQ's Alpha158 and prior processors; append independent market data."""
 
-        kwargs["infer_processors"] = [gfm] + kwargs.get("infer_processors", [])
-
+    def __init__(self, jkp_factor_mat, market_frame, **kwargs):
+        if jkp_factor_mat.shape[1] != PRIOR_DIM:
+            raise ValueError(f"Expected {PRIOR_DIM} JKP factors, got {jkp_factor_mat.shape[1]}")
+        kwargs["infer_processors"] = (
+            [GlobalFactorMerger(jkp_factor_mat, "prior")]
+            + copy.deepcopy(kwargs.get("infer_processors", []))
+            + [GlobalFactorMerger(market_frame["market"], "market"), CanonicalGroups()]
+        )
         super().__init__(**kwargs)
-
-
-def load_args():
-    parser = ArgumentParser()
-    parser.add_argument('--config', type=str, help="Path to the config data file.",
-                        default=get_root_dir().joinpath('configs', 'config.yaml'))
-    parser.add_argument('--data_handler_config', type=str, help="Path to the data handler config file.",
-                        default=None)
-    parser.add_argument('--source-dir', type=Path, default=get_root_dir() / 'dataset/data',
-                        help="Read-only v1 sampler directory for CSI300/SP500 migration.")
-    parser.add_argument('--output-dir', type=Path, default=get_root_dir() / 'dataset/schema_v2_data',
-                        help="New v2 output directory for CSI300/SP500.")
-    parser.add_argument('--universe', type=str, help="Market universe (csi300 or sp500 or csi500)",
-                        default="csi300")
-    return parser.parse_args()
 
 
 def build_factor_matrix(raw_df: pd.DataFrame, query: str, qlib_calendar: pd.Index, window: int) -> pd.DataFrame:
@@ -115,146 +83,103 @@ def build_factor_matrix(raw_df: pd.DataFrame, query: str, qlib_calendar: pd.Inde
     return cumulative_returns
 
 
-def resolve_provider_uri(config: dict, fallback: str) -> str:
-    provider_uri = config.get("qlib_init", {}).get("provider_uri", fallback)
-    return str(Path(provider_uri).expanduser())
+def label_config():
+    # Preserve HVQ's existing horizon definitions, including RET_1D.
+    return ([f"Ref($close, -{h}) / Ref($close, -1) - 1" for h in range(1, RETURN_DIM + 1)],
+            [f"RET_{h}D" for h in range(1, RETURN_DIM + 1)])
+
+
+def load_config(universe):
+    if universe not in MARKET_INDICES:
+        raise ValueError(f"Only CSI300/SP500 are supported: {universe}")
+    with (ROOT / f"dataset/2025_{universe}.yaml").open() as stream:
+        return yaml.safe_load(stream)
+
+
+def default_output_dir():
+    with (ROOT / "configs/config.yaml").open() as stream:
+        return ROOT / yaml.safe_load(stream)["data"]["data_path"]
+
+
+def default_jkp_path(universe):
+    location = {"csi300": "chn", "sp500": "usa"}[universe]
+    return ROOT / "dataset/data" / f"[{location}]_[all_themes]_[daily]_[vw_cap].csv"
+
+
+def build_handler(config, jkp_path):
+    """Build all four processed Qlib groups; never read a serialized dataset."""
+    universe = config["market"]
+    location = {"csi300": "chn", "sp500": "usa"}[universe]
+    stock = copy.deepcopy(config["data_handler_config"])
+    raw = pd.read_csv(jkp_path, parse_dates=["date"])
+    calendar = D.calendar(start_time=stock["start_time"], end_time=stock["end_time"])
+    factors = build_factor_matrix(raw, f"location=='{location}' and weighting=='vw_cap' and freq=='daily'",
+                                  calendar, STEP_LEN)
+    market = load_market_frame(config, universe)
+    stock["label"] = label_config()
+    return Alpha158WithJKP(factors, market, **stock), market
+
+
+def prepare_segment(handler, market, universe, segment, data_key):
+    start, end = map(pd.Timestamp, segment)
+    # Extra lookback rows provide the same complete stock windows as TSDatasetH.
+    calendar = market.index
+    extended_start = calendar[max(0, calendar.searchsorted(start) - STEP_LEN)]
+    frame = handler.fetch(selector=slice(extended_start, end), col_set=list(GROUP_DIMS),
+                          data_key=data_key).copy()
+    return CanonicalSampler(frame, market, universe, start, end)
+
+
+def prepare_dataset(universe, output_dir=None, jkp_path=None, config=None):
+    """Build and serialize each split from raw sources, with exclusive output creation."""
+    config = copy.deepcopy(config) if config is not None else load_config(universe)
+    if config["market"] != universe or universe not in MARKET_INDICES:
+        raise ValueError("Config market must match the requested CSI300/SP500 universe")
+    settings = config["dataset"]
+    base = dataset_basename(universe, settings["step_len"])
+    region = config["qlib_init"]["region"]
+    if region != {"csi300": "cn", "sp500": "us"}[universe]:
+        raise ValueError("Qlib region does not match the universe")
+    output_dir = Path(output_dir or default_output_dir()).resolve()
+    jkp_path = Path(jkp_path or default_jkp_path(universe))
+    if not jkp_path.is_file():
+        raise FileNotFoundError(f"JKP factor CSV not found: {jkp_path}")
+    splits = ("train", "valid", "test")
+    targets = {split: output_dir / region.upper() / f"{base}_{split}.pkl" for split in splits}
+    for path in targets.values():
+        if path.exists():
+            raise FileExistsError(f"Refusing to overwrite dataset: {path}")
+    qlib.init(provider_uri=str(Path(config["qlib_init"]["provider_uri"]).expanduser()),
+              region=region, kernels=2, exp_manager={"class": "MLflowExpManager",
+              "module_path": "qlib.workflow.expm", "kwargs": {
+                  "uri": str(output_dir / "qlib_runs"), "default_exp_name": "data_only"}})
+    handler, market = build_handler(config, jkp_path)
+    for split in splits:
+        data_key = DataHandlerLP.DK_I if split == "test" else DataHandlerLP.DK_L
+        sampler = prepare_segment(handler, market, universe, settings["segments"][split], data_key)
+        unpack_batch(sampler[[0]])
+        targets[split].parent.mkdir(parents=True, exist_ok=True)
+        with targets[split].open("xb") as stream:
+            pickle.dump(sampler, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"{universe}/{split}: {len(sampler)} samples, {sampler[0].shape} -> {targets[split]}", flush=True)
+        del sampler
+        gc.collect()
+    return targets
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--universe", choices=tuple(MARKET_INDICES), default="csi300")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--jkp-path", type=Path, help="Raw JKP CSV (not a pickle)")
+    parser.add_argument("--data-handler-config", type=Path)
+    args = parser.parse_args()
+    config = None
+    if args.data_handler_config:
+        with args.data_handler_config.open() as stream:
+            config = yaml.safe_load(stream)
+    prepare_dataset(args.universe, args.output_dir, args.jkp_path, config)
 
 
 if __name__ == "__main__":
-    args = load_args()
-    print(args)
-    # Main's supported universes migrate to v2; historical CSI500 stays below.
-    if args.universe in ("csi300", "sp500"):
-        from dataset.prepare_schema_v2 import prepare
-        prepare(args.universe, args.source_dir, args.output_dir, args.data_handler_config)
-        sys.exit(0)
-    window = 20
-
-    if args.universe == "csi300":
-        print("********** China Market **********")
-        name = '[chn]_[all_themes]_[daily]_[vw_cap].csv'
-        market = "csi300"
-        benchmark = "SH000300"
-        region = 'CN'
-        query = "location=='chn' and weighting=='vw_cap' and freq=='daily'"
-        with open(f"dataset/2025_csi300.yaml", 'r') as f:
-            config = yaml.safe_load(f)
-        provider_uri = resolve_provider_uri(config, "qlib_data/cn_data")
-        qlib.init(provider_uri=provider_uri, region=REG_CN)
-
-    elif args.universe == "csi500":
-        print("********** China Market 500 **********")
-        name = '[chn]_[all_themes]_[daily]_[vw_cap].csv'
-        market = "csi500"
-        benchmark = "SH000500"
-        region = 'CN'
-        query = "location=='chn' and weighting=='vw_cap' and freq=='daily'"
-        with open(f"dataset/2025_csi500.yaml", 'r') as f:
-            config = yaml.safe_load(f)
-        provider_uri = resolve_provider_uri(config, "qlib_data/cn_data")
-        qlib.init(provider_uri=provider_uri, region=REG_CN)
-
-    elif args.universe == "sp500":
-        print("********** US Market **********")
-        name = '[usa]_[all_themes]_[daily]_[vw_cap].csv'
-        market = "sp500"
-        benchmark = "^gspc"
-        region = 'US'
-        with open(f"dataset/2025_sp500.yaml", 'r') as f:
-            config = yaml.safe_load(f)
-        provider_uri = resolve_provider_uri(config, "qlib_data/us_data")
-        print(f"provider_uri: {provider_uri}, region: {REG_US}, name: {name}")
-        qlib.init(provider_uri=provider_uri, region=REG_US)
-        query = "location=='usa' and weighting=='vw_cap' and freq=='daily'"
-
-    else:
-        raise ValueError(f"Invalid universe: {args.universe}")
-
-    seq_len = config['task']['dataset']['kwargs']['step_len']
-    jkp_path = Path("dataset/data") / name
-    if not jkp_path.exists():
-        raise FileNotFoundError(
-            f"JKP factor file not found: {jkp_path}. "
-            "Download or copy it into dataset/data before preprocessing."
-        )
-    raw_df = pd.read_csv(jkp_path)
-    raw_df["date"] = pd.to_datetime(raw_df["date"])
-
-    qlib_calendar = D.calendar(start_time=config['data_handler_config']['start_time'],
-                               end_time=config['data_handler_config']['end_time'])
-
-    factor_mat = build_factor_matrix(raw_df, query, qlib_calendar, window)
-
-    horizons = list(range(0, 10))
-    label_expr = [f"Ref($close, -{h + 1}) / Ref($close, -1) - 1" for h in horizons]
-    label_names = [f"RET_{h + 1}D" for h in horizons]
-
-    config['data_handler_config']["label"] = (label_expr, label_names)
-    handler = Alpha158WithJKP(factor_mat, **config['data_handler_config'])
-
-    dataframe = handler.fetch(col_set="__all", data_key=DataHandlerLP.DK_L)
-    df_I = handler.fetch(col_set="__all", data_key=DataHandlerLP.DK_I)
-    print("=== dataframe index info ===")
-    print(f"index names: {dataframe.index.names}")
-    print(f"index sample: {dataframe.index[:5]}")
-    print(f"shape: {dataframe.shape}")
-    print()
-
-    output_dir = Path("./dataset/data") / region
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    dataframe.to_pickle(output_dir / f"{args.universe}_{seq_len}_dataframe_learn.pkl")
-    df_I.to_pickle(output_dir / f"{args.universe}_{seq_len}_dataframe_infer.pkl")
-
-    dataset = TSDatasetH(
-        handler=handler,
-        segments=config['task']['dataset']['kwargs']['segments'],
-        step_len=config['task']['dataset']['kwargs']['step_len'],
-        fillna_type='ffill+bfill'
-    )
-
-    print("Preparing datasets...")  # DataLoader yields (feature, prior, label/future_returns) in order
-    dl_train = dataset.prepare(
-        "train", col_set=["feature", "prior", "label"], data_key=DataHandlerLP.DK_L)
-    dl_valid = dataset.prepare(
-        "valid", col_set=["feature", "prior", "label"], data_key=DataHandlerLP.DK_L)
-    dl_test = dataset.prepare(
-        "test", col_set=["feature", "prior", "label"], data_key=DataHandlerLP.DK_I)  # DK_I
-
-    print(f"dl_train type: {type(dl_train)}")
-
-    if hasattr(dl_train, 'get_index'):
-        train_index = dl_train.get_index()
-        print(f"dl_train index type: {type(train_index)}")
-        print(f"dl_train index names: {train_index.names}")
-        print(f"dl_train index sample (first 5): {train_index[:5]}")
-        print(f"dl_train index length: {len(train_index)}")
-    else:
-        print("dl_train has no get_index() method.")
-
-    if hasattr(dl_valid, 'get_index'):
-        valid_index = dl_valid.get_index()
-        print(f"dl_valid index type: {type(valid_index)}")
-        print(f"dl_valid index names: {valid_index.names}")
-        print(f"dl_valid index sample (first 5): {valid_index[:5]}")
-        print(f"dl_valid index length: {len(valid_index)}")
-
-    if hasattr(dl_test, 'get_index'):
-        test_index = dl_test.get_index()
-        print(f"dl_test index type: {type(test_index)}")
-        print(f"dl_test index names: {test_index.names}")
-        print(f"dl_test index sample (first 5): {test_index[:5]}")
-        print(f"dl_test index length: {len(test_index)}")
-
-    dl_train.config(fillna_type='ffill+bfill')
-    dl_valid.config(fillna_type='ffill+bfill')
-    dl_test.config(fillna_type='ffill+bfill')
-
-    with open(output_dir / f"{args.universe}_{seq_len}_h{len(horizons)}_dl2_train.pkl", "wb") as f:
-        pickle.dump(dl_train, f)
-    with open(output_dir / f"{args.universe}_{seq_len}_h{len(horizons)}_dl2_valid.pkl", "wb") as f:
-        pickle.dump(dl_valid, f)
-    with open(output_dir / f"{args.universe}_{seq_len}_h{len(horizons)}_dl2_test.pkl", "wb") as f:
-        pickle.dump(dl_test, f)
-    with open(output_dir / f"{args.universe}_{seq_len}_h{len(horizons)}_dl2_dataset.pkl", "wb") as f:
-        pickle.dump(dataset, f)
+    main()

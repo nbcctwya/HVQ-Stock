@@ -10,4 +10,5 @@ mlruns/
 outputs/
 wandb/
 logs/
-dataset/schema_v2_data/
+dataset/processed/
+*.pkl

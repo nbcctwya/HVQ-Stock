@@ -1,4 +1,4 @@
-from dataset.schema import dataset_location
+from dataset.schema import dataset_basename
 import os
 import shutil
 import tempfile
@@ -295,9 +295,7 @@ def _resolve_data_path(path: Optional[str]) -> Path:
 def _resolve_universe(universe: str) -> Tuple[str, str]:
     mapping = {
         'csi300': ('CN', 'csi300'),
-        'csi500': ('CN', 'csi500'),
         'sp500': ('US', 'sp500'),
-        'nasdaq': ('US', 'nasdaq'),
     }
     if universe not in mapping:
         raise ValueError(f"Invalid universe: {universe}")
@@ -307,8 +305,8 @@ def _resolve_universe(universe: str) -> Tuple[str, str]:
 def _prepare_dataloaders(cfg: DictConfig,
                          region_code: str,
                          universe_prefix: str):
-    root, base = dataset_location(cfg.data, universe_prefix, cfg.vqvae.predictor.pred_len)
-    data_path = _resolve_data_path(root)
+    base = dataset_basename(universe_prefix, cfg.data.window_size, cfg.vqvae.predictor.pred_len)
+    data_path = _resolve_data_path(cfg.data.get('data_path'))
 
     file_map = {
         'train': data_path / region_code / f"{base}_train.pkl",

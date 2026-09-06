@@ -1,1 +1,1 @@
-"""HVQ dataset schemas, samplers and preprocessing entrypoints."""
+"""HVQ's canonical dataset, samplers and preprocessing entrypoint."""

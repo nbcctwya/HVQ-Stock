@@ -1,4 +1,4 @@
-from dataset.schema import unpack_model_batch
+from dataset.schema import unpack_batch
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -77,7 +77,7 @@ def run_inference(model, data_loader, config, device=None):
         batch = batch.float()
         batch = batch.to(device)
 
-        parts = unpack_model_batch(batch, config)
+        parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
         # market_feature is deliberately unused by the current baseline.
         label = parts.target(target_index + 1)

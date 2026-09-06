@@ -1,122 +1,149 @@
-# HVQ dataset schema
+# HVQ canonical dataset
 
-Schema v1: **158 stock + 13 prior + 10 future returns = 181**. Used by
-experiments **001–006**, with their original `*_dl2_{train,valid,test}.pkl` data.
-Keep those files and experiment branches for reproduction.
+Main has exactly one schema for **CSI300 and SP500**:
 
-Schema v2: **158 stock + 13 prior + 63 market + 10 future returns = 244**.
-Used by **main and future experiments**. Only CSI300 and SP500 are upgraded.
+**158 stock + 13 prior + 63 market + 10 future returns = 244 dimensions.**
 
-| Group | v2 slice | Parsed shape |
+| Qlib group | Slice | Parsed shape |
 | --- | --- | --- |
-| `feature` (stock) | `0:158` | `[N,20,158]` |
+| `feature` (stock) | `0:158` | `[N,T,158]` |
 | `prior` | `158:171` | `[N,13]` |
-| `market` | `171:234` | `[N,20,63]` |
+| `market` | `171:234` | `[N,T,63]` |
 | `label` (future returns) | `234:244` | `[N,10]` |
 
-`schema.py` owns the widths, offsets, versions and filenames. All six trainers
-and `utils/test.py` use `unpack_model_batch`, which calls `unpack_batch`.
-The parser accepts v1 and v2, rejects unknown widths, retains singleton stock
-batches, and returns `market_feature=None` for v1. `parts.target(5)` selects
-the fifth column of **future_returns**, with horizon bounds checked. Never
-slice returns from `num_features + num_prior_factors` to the end of a v2 batch.
+The generated datasets use **T=20**. `num_features` remains **158**.
+`schema.py` centrally defines the dimensions, group order, slices and filename
+convention. All six trainers and `utils/test.py` call `unpack_batch(batch)`.
+It accepts only `[N,T,244]`, preserves singleton stock batches, and raises
+`ValueError` for any other width (including 181). It never guesses a schema
+and always returns all four groups. `parts.target(5)` reads only the fifth
+column of `future_returns`, with integer horizon bounds checked. DataLoader
+creation also validates the sample width before entering a model loop.
 
-## Market63
+Experiments **001–006** retain their own historical conventions. Reproduction
+belongs to their frozen branches: check out the corresponding branch and
+regenerate data using its code. Main does not implement their data format.
 
-| Universe | Region | Indices, in feature order |
-| --- | --- | --- |
-| CSI300 | CN | `sh000300`, **`sh000852`**, `sh000905` |
-| SP500 | US | `^gspc`, `^dji`, `^ndx` |
+## Direct generation from raw data
 
-The formulas and ordering come from AlphaMaster's
-`src/alphamaster/dataset.py::marketDataHandler.get_feature_config`, with the
-explicit index lists and normalization in `configs/master_csi300.yaml` and
-`configs/master_sp500.yaml`. Do not use AlphaMaster's historical default
-`sh000903`; the active CN config uses `sh000852`.
+`get_dataset.py` is the single preprocessing entrypoint:
 
-For each index, the 21 expressions are the one-day return
-`$close/Ref($close,1)-1`, followed by these four expressions for each window
-`w = 5,10,20,30,60`, in order:
+```text
+local Qlib OHLCV -> inherited HVQ Alpha158 ------------------ feature (158)
+raw JKP daily CSV -> prior rolling returns + normalization - prior (13)
+Qlib Mask expressions -> market normalization -------------- market (63)
+Qlib forward close expressions + label processors ---------- label (10)
+                                  |
+                       four-group Qlib DataFrame
+                                  |
+                       CanonicalSampler, step_len=20
+                                  |
+                       canonical train/valid/test pickle
+```
+
+No input pickle is read. The generator inherits the existing Qlib Alpha158
+feature configuration without replacing or extending stock formulas, including
+HVQ's existing US stock feature handling. JKP definitions also stay unchanged:
+select the country's `vw_cap`, `daily` rows, pivot factors by date/name, reindex
+to the Qlib calendar, shift by one trading day, then compute
+`expm1(rolling_20_sum(log1p(ret)))`. Exactly 13 prior columns are required.
+Stock and prior use their existing RobustZScoreNorm/Fillna processors.
+
+The ten labels keep HVQ's existing expressions
+`Ref($close, -h) / Ref($close, -1) - 1`, for `h=1..10`, named `RET_1D` through
+`RET_10D` (including the existing zero-valued raw first horizon). Train/valid
+use `DK_L`, with DropnaLabel and CSRankNorm; test uses `DK_I`.
+
+`Alpha158WithJKP` produces the ordered Qlib groups `feature`, `prior`, `market`,
+`label`. `CanonicalSampler` accepts only this DataFrame layout, retains actual
+column names, and serializes all 244 columns. Stock/prior/label windows use
+Qlib's existing `ffill+bfill` behavior. Market windows use their own trading
+calendar by endpoint date, so suspended or newly listed stocks share exactly
+the same market sequence as other stocks on that date. Missing market dates,
+insufficient history, incorrect formula ordering or non-finite market values
+fail explicitly.
+
+## CN and US market63
+
+| Universe | Indices, in feature order |
+| --- | --- |
+| CSI300 | `sh000300`, **`sh000852`**, `sh000905` |
+| SP500 | `^gspc`, `^dji`, `^ndx` |
+
+`market.py` follows AlphaMaster's
+`src/alphamaster/dataset.py::marketDataHandler.get_feature_config` and the
+explicit index lists in `configs/master_csi300.yaml` / `master_sp500.yaml`.
+For each index, first emit `$close/Ref($close,1)-1`, then the following four
+expressions for each window `w=5,10,20,30,60`, in this order:
 
 1. `Mean($close/Ref($close,1)-1,w)`
 2. `Std($close/Ref($close,1)-1,w)`
 3. `Mean($volume,w)/$volume`
 4. `Std($volume,w)/$volume`
 
-Every expression is evaluated by Qlib as `Mask(expression, "index")`, preserving
-Qlib's reference, rolling-window, volume and mask semantics. The separate
-`MarketDataHandler` applies RobustZScoreNorm (fit 2009–2020, clip outliers) and
-Fillna to **market**, using the same universe/date weighting as AlphaMaster.
-Entirely missing market expressions fail before Fillna can hide a missing
-index. Processed rows must be identical across stocks for each date and finite.
+Every expression uses Qlib `Mask(expression, "index")` unchanged: **21 × 3 = 63**.
+Market preprocessing uses a separate group with AlphaMaster's universe/date
+weighting, RobustZScoreNorm fitted on 2009–2020, clipping and Fillna. Entirely
+missing index expressions fail before Fillna can hide the missing feed.
+Processed market rows are checked for equality across stocks on each date.
 
-`MarketWindowSampler` embeds the unchanged v1 TSDataSampler and adds market
-windows by endpoint trading date. Market uses its own calendar so stock
-suspensions or listing gaps cannot change the shared market history. The
-complete 20-day market window is retained; missing dates/history fail explicitly.
-The wrapper exposes the four column groups and the existing `get_index`,
-`config`, integer/vectorized/tuple sampling interfaces used by HVQ DataLoaders.
-It stores one market row per date, avoiding duplicating market storage for
-every stock. The serialized sampler is self-contained: it does not read the
-old pickle at runtime. Stock, prior, labels, fill rules and sample order are
-preserved, including existing US stock feature handling and return definitions.
+**The baseline currently ignores market63.** No Gate, market encoder, market
+conditioning or fusion mechanism is added. Later experiments may investigate
+market-aware mechanisms.
 
-**The current baseline does not use market63.** No Gate, market encoder, or
-market-aware MoE is implemented. This is infrastructure for future
-market-aware experiments; model inputs and checkpoint state dictionaries stay
-unchanged.
+## Commands and filenames
 
-## Generate v2 data
-
-Use the environment containing Qlib and PyTorch (locally `prism-vq`) from the
-HVQ repository root. This migration requires the existing v1 samplers and
-local Qlib CN/US providers. It deliberately does not recompute stock features,
-JKP priors, or labels from raw data, preserving exact v1 compatibility.
+From the HVQ repository root, in an environment with Qlib and PyTorch
+(locally `prism-vq`):
 
 ```bash
-python -m dataset.prepare_schema_v2 --universe csi300
-python -m dataset.prepare_schema_v2 --universe sp500
+python -m dataset.get_dataset --universe csi300
+python -m dataset.get_dataset --universe sp500
 ```
 
-The existing `python dataset/get_dataset.py --universe csi300` / `sp500`
-entrypoints now dispatch to the same migration. The historical CSI500 path
-is unchanged. For custom locations, pass `--source-dir`, `--output-dir`, and
-optionally `--data-handler-config` to the module entrypoint
-(`--data_handler_config` on the old entrypoint).
+`python dataset/get_dataset.py` accepts the same arguments. Inputs are the
+Qlib providers configured in `dataset/2025_{csi300,sp500}.yaml` and the raw
+JKP CSVs under `dataset/data/`:
 
-Input defaults to `dataset/data/{CN,US}`. Output defaults to the separate
-`dataset/schema_v2_data/{CN,US}` directory inside HVQ, because local
-`dataset/data` may be a symlink shared with other repositories. All outputs
-use exclusive creation; existing v1 **and v2** files are never overwritten.
-There are no new unversioned dataframe pickle outputs.
+- `[chn]_[all_themes]_[daily]_[vw_cap].csv`
+- `[usa]_[all_themes]_[daily]_[vw_cap].csv`
+
+Override these with `--jkp-path` and `--data-handler-config` if necessary.
+The generator reads the default output directory from `data.data_path` in
+`configs/config.yaml`, currently `dataset/processed`; `--output-dir` can
+choose a different directory. Outputs are exclusively created and never
+silently overwritten:
 
 ```text
-dataset/schema_v2_data/CN/csi300_20_h10_schema_v2_train.pkl
-dataset/schema_v2_data/CN/csi300_20_h10_schema_v2_valid.pkl
-dataset/schema_v2_data/CN/csi300_20_h10_schema_v2_test.pkl
-dataset/schema_v2_data/US/sp500_20_h10_schema_v2_train.pkl
-dataset/schema_v2_data/US/sp500_20_h10_schema_v2_valid.pkl
-dataset/schema_v2_data/US/sp500_20_h10_schema_v2_test.pkl
+dataset/processed/CN/csi300_20_h10_train.pkl
+dataset/processed/CN/csi300_20_h10_valid.pkl
+dataset/processed/CN/csi300_20_h10_test.pkl
+dataset/processed/US/sp500_20_h10_train.pkl
+dataset/processed/US/sp500_20_h10_valid.pkl
+dataset/processed/US/sp500_20_h10_test.pkl
 ```
 
-Stage1/Stage2 default to `data.schema_version=2` and
-`data.schema_v2_path=dataset/schema_v2_data`. An explicit
-`data.schema_version=1` selects legacy filenames under `data.data_path` for
-main's compatibility checks. Experiments 001–006 retain their original code
-and data configuration. New datasets are ignored by Git and must not be committed.
+Stage1 and Stage2 read only these names under `data.data_path/{CN,US}`.
+There is no alternate path, version switch or filename fallback. If generating
+elsewhere, set `data.data_path` to that output directory when running the model.
+The separate output directory avoids writes through the locally shared
+`dataset/data` symlink. Pickles are reproducible artifacts and ignored by Git.
+Older artifact files are neither read nor maintained by main.
 
 ## Validate without training
 
 ```bash
 python -m unittest discover -s tests -v
-python scripts/smoke_schema_v2.py
-# Optional: full Stage2 checkpoint with architecture matching main/config.yaml
-python scripts/smoke_schema_v2.py --checkpoint /path/to/existing-stage2.ckpt
+python scripts/smoke_dataset.py
 ```
 
-The smoke check covers both universes and all three splits: every legacy
-storage row, sample identities, parsed shapes, return isolation, horizon 5,
-shared market windows, and a real DataLoader batch. The optional checkpoint
-is loaded strictly on CPU, used in eval/no-grad mode, and requires **exact**
-v1/v2 prediction equality. It performs no optimizer step, formal inference
-export, training, or backtest.
+The smoke script **generates from actual raw Qlib and JKP inputs**, with a
+small 2020–2021 date range and three days per split. It disables `pickle.load`
+during generation to catch accidental serialized-data dependencies, then
+reloads its newly generated outputs to check all four groups, shape, horizon
+5, same-date market sequences, finite information groups and a real DataLoader batch for
+both markets. It uses temporary files and removes them on completion; pass
+`--output-dir /path/to/fresh/smoke-dir` to retain smoke outputs. Smoke files
+are small validation fixtures and are not production train/valid/test splits.
+Missing future labels in DK_I remain unchanged (for example around stock suspensions).
+No model training, inference export or formal backtest is performed.

@@ -1,7 +1,8 @@
-"""Regression coverage for return-block isolation and unchanged legacy sampling."""
+"""Canonical group, parser, calendar, and raw-factor regression coverage."""
 
-import importlib
+import ast
 import contextlib
+import importlib
 import io
 import pickle
 import tempfile
@@ -13,77 +14,87 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 import torch
-import yaml
-from qlib.data.dataset import TSDataSampler
+from omegaconf import OmegaConf
+from qlib.contrib.data.handler import Alpha158
+from qlib.data.dataset.handler import DataHandlerLP
 
-from dataset.market import MarketWindowSampler, market_feature_config
-from dataset.prepare_schema_v2 import prepare
+from dataset.dataset import init_data_loader
+from dataset.get_dataset import (
+    Alpha158WithJKP, GlobalFactorMerger, build_factor_matrix, label_config,
+    load_config, prepare_dataset, prepare_segment,
+)
+from dataset.market import CanonicalSampler, market_feature_config
 from dataset.schema import (
-    MARKET_INDICES, SCHEMA_V1, SCHEMA_V2, dataset_basename, dataset_location, unpack_batch,
+    GROUP_DIMS, GROUP_SLICES, MARKET_INDICES, TOTAL_DIM, dataset_basename,
+    unpack_batch, validate_columns,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+TRAINERS = ("train_vqvae", "train_ypred", "train_ypred_autoregressive",
+            "train_ypred_wo_moe", "train_ypred_wo_prior", "train_ypred_wo_stage1")
+
+
+def sample_frame(universe):
+    dates = pd.bdate_range("2020-01-01", periods=45, name="datetime")
+    index = pd.MultiIndex.from_product([dates, ["A", "B"]], names=["datetime", "instrument"])
+    columns = pd.MultiIndex.from_tuples([(g, f"{g}_{i}") for g, n in GROUP_DIMS.items() for i in range(n)])
+    frame = pd.DataFrame(np.random.default_rng(7).normal(size=(len(index), TOTAL_DIM)), index=index, columns=columns)
+    fields, _ = market_feature_config(MARKET_INDICES[universe])
+    market = pd.DataFrame(np.arange(len(dates) * 63).reshape(-1, 63), index=dates,
+                          columns=pd.MultiIndex.from_product([["market"], fields]))
+    frame.columns = pd.MultiIndex.from_tuples([
+        (g, fields[i] if g == "market" else f"{g}_{i}") for g, n in GROUP_DIMS.items() for i in range(n)])
+    frame.loc[:, "market"] = market.loc[index.get_level_values("datetime")].to_numpy()
+    # A stock gap must not shift the common market sequence.
+    return frame.drop([(dates[3], "B"), (dates[29], "A")]), market
 
 
 class SchemaTest(unittest.TestCase):
     def setUp(self):
-        self.v1 = torch.arange(2 * 20 * SCHEMA_V1.total_dim).reshape(2, 20, -1).float()
-        split = SCHEMA_V1.slices["label"].start
-        self.v2 = torch.cat((self.v1[..., :split], torch.full((2, 20, 63), -999.),
-                             self.v1[..., split:]), dim=-1)
+        self.batch = torch.arange(2 * 20 * TOTAL_DIM).reshape(2, 20, -1).float()
+        self.batch[..., GROUP_SLICES["market"]] = -999
 
     def test_layout_shapes_and_target(self):
-        self.assertEqual(SCHEMA_V2.total_dim, 244)
-        self.assertEqual(SCHEMA_V2.slices, {"feature": slice(0, 158), "prior": slice(158, 171),
-                                          "market": slice(171, 234), "label": slice(234, 244)})
-        a, b = unpack_batch(self.v1), unpack_batch(self.v2)
-        self.assertEqual([tuple(x.shape) for x in b], [(2, 20, 158), (2, 13), (2, 20, 63), (2, 10)])
-        self.assertIsNone(a.market_feature)
-        for i in (0, 1, 3):
-            torch.testing.assert_close(a[i], b[i], rtol=0, atol=0)
-        torch.testing.assert_close(b.target(5), self.v1[:, -1, -6], rtol=0, atol=0)
-        self.assertFalse((b.future_returns == -999).any())
+        self.assertEqual(TOTAL_DIM, 244)
+        self.assertEqual(GROUP_SLICES, {"feature": slice(0, 158), "prior": slice(158, 171),
+                                       "market": slice(171, 234), "label": slice(234, 244)})
+        parts = unpack_batch(self.batch)
+        self.assertEqual([tuple(x.shape) for x in parts], [(2, 20, 158), (2, 13), (2, 20, 63), (2, 10)])
+        torch.testing.assert_close(parts.target(5), self.batch[:, -1, 238], rtol=0, atol=0)
+        self.assertFalse((parts.future_returns == -999).any())
+        self.assertEqual(unpack_batch(self.batch[:1]).future_returns.shape, (1, 10))
 
-    def test_single_stock_outer_loader_and_invalid_layout(self):
-        for batch in (self.v2[:1], self.v2[:1][None]):
-            self.assertEqual(unpack_batch(batch).future_returns.shape, (1, 10))
-        for batch in (torch.zeros(2, 20, 243), self.v2[0], torch.zeros(2, 0, 244)):
+    def test_reject_every_noncanonical_width(self):
+        for width in (0, 158, 171, 181, 234, 243, 245, 307):
+            with self.subTest(width=width), self.assertRaises(ValueError):
+                unpack_batch(torch.zeros(2, 20, width))
+        for batch in (self.batch[0], self.batch[None], torch.zeros(2, 0, 244)):
             with self.assertRaises(ValueError):
                 unpack_batch(batch)
-        with self.assertRaises(ValueError):
-            unpack_batch(self.v2, version=1)
-        for day in (0, 11):
+        for day in (0, 11, 2.5):
             with self.assertRaises(ValueError):
-                unpack_batch(self.v2).target(day)
+                unpack_batch(self.batch).target(day)
+        with self.assertRaises(ValueError):
+            init_data_loader([np.zeros((20, 181))], shuffle=False)
 
-    def test_all_trainer_parsers(self):
-        config = {"vqvae": {"num_features": 158, "num_prior_factors": 13,
-                            "predictor": {"pred_len": 10}}}
-        for name in ("train_vqvae", "train_ypred", "train_ypred_autoregressive",
-                     "train_ypred_wo_moe", "train_ypred_wo_prior", "train_ypred_wo_stage1"):
+    def test_all_trainers_use_only_canonical_parser(self):
+        for name in TRAINERS:
             with self.subTest(trainer=name):
                 module = importlib.import_module("trainer." + name)
                 cls = module.FactorVQVAE if name == "train_vqvae" else module.GenerateReturn
-                owner = SimpleNamespace(config=config, target_index=4)
-                a = cls._get_data(owner, self.v1[:1], 0)
-                b = cls._get_data(owner, self.v2[:1], 0)
-                for x, y in zip(a, b):
-                    torch.testing.assert_close(x, y, rtol=0, atol=0)
-                expected = unpack_batch(self.v1[:1])
-                torch.testing.assert_close(b[-1], expected.future_returns if name == "train_vqvae"
+                owner = SimpleNamespace(target_index=4)
+                with mock.patch.object(module, "unpack_batch", wraps=unpack_batch) as parser:
+                    result = cls._get_data(owner, self.batch[:1], 0)
+                    parser.assert_called_once()
+                expected = unpack_batch(self.batch[:1])
+                torch.testing.assert_close(result[0], expected.stock_feature, rtol=0, atol=0)
+                torch.testing.assert_close(result[-1], expected.future_returns if name == "train_vqvae"
                                            else expected.target(5), rtol=0, atol=0)
+                with self.assertRaises(ValueError):
+                    cls._get_data(owner, torch.zeros(2, 20, 181), 0)
 
-    def test_default_paths_and_legacy_opt_in(self):
-        cfg = {"window_size": 20, "data_path": "old"}
-        for universe in MARKET_INDICES:
-            self.assertEqual(dataset_location(cfg, universe, 10),
-                             ("dataset/schema_v2_data", f"{universe}_20_h10_schema_v2"))
-            self.assertEqual(dataset_location({**cfg, "schema_version": 1}, universe, 10),
-                             ("old", f"{universe}_20_h10_dl2"))
-        self.assertEqual(dataset_location(cfg, "csi500", 10), ("old", "csi500_20_h10_dl2"))
-
-    def test_inference_reads_the_return_block(self):
-        from utils.test import run_inference
+    def test_inference_uses_canonical_returns_and_ignores_market(self):
+        from utils import test as inference
 
         class Model(torch.nn.Module):
             def forward(self, stock, prior):
@@ -94,59 +105,32 @@ class SchemaTest(unittest.TestCase):
                 [pd.to_datetime(["2023-01-03", "2023-01-04"]), ["A", "B"]],
                 names=["datetime", "instrument"]))
 
-        config = {"vqvae": {"num_features": 158, "num_prior_factors": 13},
-                  "predictor": {"target_day": 5}}
+        changed = self.batch.clone()
+        changed[..., GROUP_SLICES["market"]] = 987654
+        config = {"predictor": {"target_day": 5}}
         with contextlib.redirect_stdout(io.StringIO()), np.errstate(divide="ignore", invalid="ignore"):
-            before = run_inference(Model(), Loader([self.v1, self.v1 + 1]), config, "cpu")[0]
-            after = run_inference(Model(), Loader([self.v2, self.v2 + 1]), config, "cpu")[0]
-        pd.testing.assert_frame_equal(before, after, check_exact=True)
-        np.testing.assert_array_equal(after.label.to_numpy(),
-                                      torch.cat([unpack_batch(self.v1).target(5),
-                                                 unpack_batch(self.v1 + 1).target(5)]).numpy())
-
-
-class MarketSamplerTest(unittest.TestCase):
-    def make_sampler(self, universe):
-        dates = pd.bdate_range("2020-01-01", periods=45, name="datetime")
-        index = pd.MultiIndex.from_product([dates, ["A", "B"]], names=["datetime", "instrument"])
-        values = np.random.default_rng(7).normal(size=(len(index), SCHEMA_V1.total_dim))
-        df = pd.DataFrame(values, index=index)
-        # Suspension and new-listing-style holes must not alter the market window.
-        df = df.drop([(dates[3], "B"), (dates[29], "A")])
-        old = TSDataSampler(df, start=dates[20], end=dates[-1], step_len=20,
-                            fillna_type="ffill+bfill")
-        fields, _ = market_feature_config(MARKET_INDICES[universe])
-        daily = pd.DataFrame(np.arange(len(dates) * 63).reshape(-1, 63), index=dates,
-                             columns=pd.MultiIndex.from_product([["market"], fields]))
-        return old, daily, MarketWindowSampler(old, daily, universe)
-
-    def test_both_universes_windows_groups_and_roundtrip(self):
-        for universe in MARKET_INDICES:
-            with self.subTest(universe=universe):
-                old, daily, new = self.make_sampler(universe)
-                self.assertEqual(new.columns.get_level_values(0).value_counts().to_dict(),
-                                 {"feature": 158, "prior": 13, "market": 63, "label": 10})
-                for date in new.get_index().get_level_values("datetime").unique():
-                    ix = np.flatnonzero(new.get_index().get_level_values("datetime") == date)
-                    before, after = unpack_batch(old[ix]), unpack_batch(new[ix])
-                    for i in (0, 1, 3):
-                        np.testing.assert_array_equal(before[i], after[i])
-                    expected = daily.loc[:date].iloc[-20:].to_numpy()
-                    for window in after.market_feature:
-                        np.testing.assert_array_equal(window, expected)
-                restored = pickle.loads(pickle.dumps(new))
-                np.testing.assert_array_equal(new[0], restored[0])
-                np.testing.assert_array_equal(new[0], new[new.get_index()[0]])
-
-    def test_missing_calendar_fails(self):
-        old, daily, _ = self.make_sampler("csi300")
+            with mock.patch.object(inference, "unpack_batch", wraps=unpack_batch) as parser:
+                first = inference.run_inference(Model(), Loader([self.batch, self.batch + 1]), config, "cpu")[0]
+                self.assertEqual(parser.call_count, 2)
+            second = inference.run_inference(Model(), Loader([changed, changed + 1]), config, "cpu")[0]
+        pd.testing.assert_frame_equal(first, second, check_exact=True)
+        np.testing.assert_array_equal(first.label.to_numpy(), torch.cat([
+            unpack_batch(self.batch).target(5), unpack_batch(self.batch + 1).target(5)]).numpy())
         with self.assertRaises(ValueError):
-            MarketWindowSampler(old, daily.iloc[1:], "csi300")
+            inference.run_inference(Model(), Loader([torch.zeros(2, 20, 181)]), config, "cpu")
 
-    def test_exact_formula_order_and_config_indices(self):
+    def test_only_one_filename_convention(self):
+        for universe in MARKET_INDICES:
+            self.assertEqual(dataset_basename(universe), f"{universe}_20_h10")
+        for args in (("csi500",), ("csi300", 8), ("sp500", 20, 5)):
+            with self.assertRaises(ValueError):
+                dataset_basename(*args)
+
+
+class GenerationTest(unittest.TestCase):
+    def test_market_formulas_match_reference_order(self):
         for universe, indices in MARKET_INDICES.items():
-            with (ROOT / f"dataset/2025_{universe}.yaml").open() as stream:
-                cfg = yaml.safe_load(stream)
+            cfg = load_config(universe)
             self.assertEqual(tuple(cfg["market_data_handler_config"]["market_indices"]), indices)
             fields, names = market_feature_config(indices)
             expected = []
@@ -160,20 +144,137 @@ class MarketSamplerTest(unittest.TestCase):
             self.assertEqual(fields, expected)
             self.assertEqual(names, fields)
             self.assertEqual(len(fields), 63)
+        # Read the reference method without importing/writing into AlphaMaster.
+        path = ROOT.parent / "AlphaMaster/src/alphamaster/dataset.py"
+        if path.exists():
+            tree = ast.parse(path.read_text())
+            cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "marketDataHandler")
+            method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "get_feature_config")
+            scope = {}
+            exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), scope)
+            for indices in MARKET_INDICES.values():
+                self.assertEqual(scope["get_feature_config"](SimpleNamespace(market_indices=indices)),
+                                 market_feature_config(indices))
 
-    def test_conversion_refuses_overwrite_before_loading(self):
+    def test_stock_and_prior_definitions_unchanged(self):
+        self.assertIs(Alpha158WithJKP.get_feature_config, Alpha158.get_feature_config)
+        dates = pd.bdate_range("2020-01-01", periods=25)
+        raw = pd.DataFrame([{"date": d, "name": f"factor{i}", "ret": .01}
+                            for d in dates for i in range(13)])
+        factors = build_factor_matrix(raw, "ret == .01", dates, 20)
+        self.assertTrue(factors.iloc[:20].isna().all().all())
+        np.testing.assert_allclose(factors.iloc[20:], 1.01 ** 20 - 1)
+        altered = raw.copy()
+        altered.loc[altered.date == dates[20], "ret"] = .9
+        altered_factors = build_factor_matrix(altered, "ret >= .01", dates, 20)
+        np.testing.assert_array_equal(factors.iloc[20], altered_factors.iloc[20])
+        self.assertEqual(label_config()[0][4], "Ref($close, -5) / Ref($close, -1) - 1")
+        self.assertEqual(len(label_config()[0]), 10)
+
+    def test_broadcast_prior(self):
+        frame, market = sample_frame("csi300")
+        values = pd.DataFrame(np.ones((len(market), 13)), index=market.index)
+        merged = GlobalFactorMerger(values, "prior")(frame[["feature"]])
+        self.assertEqual(merged["prior"].shape, (len(frame), 13))
+        np.testing.assert_array_equal(merged["prior"], 1)
+
+    def test_both_markets_canonical_sampler_and_dataloader(self):
+        for universe in MARKET_INDICES:
+            with self.subTest(universe=universe):
+                frame, market = sample_frame(universe)
+                sampler = CanonicalSampler(frame.copy(), market, universe, market.index[20], market.index[-1])
+                self.assertEqual(sampler.data_arr.shape[-1], 244)
+                validate_columns(sampler.columns)
+                dates = sampler.get_index().get_level_values("datetime")
+                for date in dates.unique():
+                    indices = np.flatnonzero(dates == date)
+                    parts = unpack_batch(sampler[indices])
+                    expected = market.loc[:date].iloc[-20:].to_numpy()
+                    np.testing.assert_array_equal(parts.market_feature,
+                                                  np.broadcast_to(expected, parts.market_feature.shape))
+                restored = pickle.loads(pickle.dumps(sampler))
+                np.testing.assert_array_equal(sampler[0], restored[0])
+                np.testing.assert_array_equal(sampler[0], sampler[sampler.get_index()[0]])
+                loader, _ = init_data_loader(sampler, shuffle=False)
+                self.assertEqual(unpack_batch(next(iter(loader))).market_feature.shape[1:], (20, 63))
+                # __getitem__ must not mutate Qlib's stored rows.
+                storage = sampler.data_arr.copy()
+                sampler[0]
+                np.testing.assert_array_equal(storage, sampler.data_arr)
+
+    def test_bad_market_or_group_layout_fails(self):
+        frame, market = sample_frame("csi300")
+        for bad_market in (market.iloc[:, :-1], market.iloc[:, ::-1], market.iloc[1:], market * np.nan):
+            with self.assertRaises(ValueError):
+                CanonicalSampler(frame.copy(), bad_market, "csi300", market.index[20], market.index[-1])
+        for bad in (frame.iloc[:, :-1], frame.iloc[:, ::-1]):
+            with self.assertRaises(ValueError):
+                CanonicalSampler(bad.copy(), market, "csi300", market.index[20], market.index[-1])
+
+    def test_missing_inference_labels_are_preserved(self):
+        frame, market = sample_frame("csi300")
+        date = market.index[25]
+        frame.loc[(date, "A"), ("label", "label_4")] = np.nan
+        sampler = CanonicalSampler(frame, market, "csi300", date, date)
+        parts = unpack_batch(sampler[[sampler.get_index().get_loc((date, "A"))]])
+        self.assertTrue(np.isnan(parts.target(5)[0]))
+        self.assertTrue(np.isfinite(parts.market_feature).all())
+
+    def test_prepare_segments_use_correct_qlib_data_key(self):
+        frame, market = sample_frame("csi300")
+        handler = mock.Mock()
+        handler.fetch.side_effect = lambda **kwargs: frame.copy()
+        for key in (DataHandlerLP.DK_L, DataHandlerLP.DK_I):
+            result = prepare_segment(handler, market, "csi300", [market.index[20], market.index[-1]], key)
+            self.assertEqual(result[0].shape, (20, 244))
+            self.assertEqual(handler.fetch.call_args.kwargs["col_set"], list(GROUP_DIMS))
+            self.assertEqual(handler.fetch.call_args.kwargs["data_key"], key)
+
+    def test_generation_does_not_read_pickles_and_refuses_overwrite(self):
+        frame, market = sample_frame("csi300")
+        cfg = load_config("csi300")
+        cfg["dataset"]["segments"] = {s: [market.index[20], market.index[-1]] for s in ("train", "valid", "test")}
+        handler = mock.Mock()
+        handler.fetch.side_effect = lambda **kwargs: frame.copy()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "CN").mkdir()
-            for split in ("train", "valid", "test"):
-                (root / "CN" / f"{dataset_basename('csi300', version=1)}_{split}.pkl").touch()
-            target = root / "CN" / f"{dataset_basename('csi300')}_train.pkl"
-            target.write_bytes(b"existing")
-            with mock.patch("dataset.prepare_schema_v2.qlib.init") as init:
+            csv = root / "prior.csv"
+            csv.write_text("date,name,ret\n")
+            with mock.patch("dataset.get_dataset.qlib.init"), mock.patch("dataset.get_dataset.build_handler", return_value=(handler, market)), mock.patch("pickle.load", side_effect=AssertionError("must not read pickle")):
+                outputs = prepare_dataset("csi300", root, csv, cfg)
+            self.assertEqual(len(outputs), 3)
+            self.assertEqual([call.kwargs["data_key"] for call in handler.fetch.call_args_list],
+                             [DataHandlerLP.DK_L, DataHandlerLP.DK_L, DataHandlerLP.DK_I])
+            for path in outputs.values():
+                with path.open("rb") as stream:
+                    self.assertEqual(pickle.load(stream)[0].shape, (20, 244))
+            with mock.patch("dataset.get_dataset.qlib.init") as init:
                 with self.assertRaises(FileExistsError):
-                    prepare("csi300", root, root)
+                    prepare_dataset("csi300", root, csv, cfg)
                 init.assert_not_called()
-            self.assertEqual(target.read_bytes(), b"existing")
+
+    def test_stage_readers_use_the_same_canonical_files(self):
+        # Importing the two standalone entrypoints together would register the
+        # same unrelated Hydra resolver twice. No model/trainer is constructed.
+        with mock.patch.object(OmegaConf, "register_new_resolver"):
+            stage1 = importlib.import_module("stage1")
+            stage2 = importlib.import_module("stage2")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = OmegaConf.create({"data": {"data_path": tmp, "window_size": 20},
+                                    "vqvae": {"predictor": {"pred_len": 10}},
+                                    "train": {"num_workers": 0}})
+            for universe, region in (("csi300", "CN"), ("sp500", "US")):
+                frame, market = sample_frame(universe)
+                sampler = CanonicalSampler(frame, market, universe, market.index[20], market.index[-1])
+                (Path(tmp) / region).mkdir()
+                for split in ("train", "valid", "test"):
+                    with (Path(tmp) / region / f"{dataset_basename(universe)}_{split}.pkl").open("wb") as stream:
+                        pickle.dump(sampler, stream)
+                first = stage1._prepare_dataset(cfg, region, universe, {})
+                self.assertTrue(all(dataset[0].shape == (20, 244) for dataset in first))
+                second = stage2._prepare_dataloaders(cfg, region, universe)
+                for loader in second[:3]:
+                    self.assertEqual(unpack_batch(next(iter(loader))).market_feature.shape[1:], (20, 63))
 
 
 if __name__ == "__main__":

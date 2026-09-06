@@ -1,4 +1,4 @@
-from dataset.schema import dataset_location
+from dataset.schema import dataset_basename
 from pathlib import Path
 from typing import List, Optional
 
@@ -160,8 +160,8 @@ def _prepare_dataset(cfg: DictConfig,
                      region_code: str,
                      universe_prefix: str,
                      data_handler_config: dict):
-    root, base = dataset_location(cfg.data, universe_prefix, cfg.vqvae.predictor.pred_len)
-    data_path = _resolve_data_path(root)
+    base = dataset_basename(universe_prefix, cfg.data.window_size, cfg.vqvae.predictor.pred_len)
+    data_path = _resolve_data_path(cfg.data.get('data_path'))
 
     if not data_path:
         raise ValueError("data.data_path is not configured. Set it in config.yaml.")
@@ -202,15 +202,9 @@ def main(cfg: DictConfig) -> None:
     if universe == 'csi300':
         region_code = 'CN'
         universe_prefix = 'csi300'
-    elif universe == 'csi500':
-        region_code = 'CN'
-        universe_prefix = 'csi500'
     elif universe == 'sp500':
         region_code = 'US'
         universe_prefix = 'sp500'
-    elif universe == 'nasdaq':
-        region_code = 'US'
-        universe_prefix = 'nasdaq'
     else:
         raise ValueError(f"Invalid universe: {universe}")
 

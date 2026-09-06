@@ -11,21 +11,24 @@
 
 This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
 
-## Dataset schema on main
+## Canonical dataset on main
 
-Schema v1 (`158 stock + 13 prior + 10 future returns`, 181 dimensions) remains
-the data format for experiments **001–006**. Their branches, records and old
-`*_dl2_*.pkl` files are unchanged.
+HVQ main has one dataset schema: **158 stock + 13 prior + 63 market +
+10 future returns = 244 dimensions**, for **CSI300 and SP500 only**. Data is
+built directly from Qlib and raw JKP factor CSVs; no pre-existing dataset
+pickle is needed. Other batch widths fail explicitly.
 
-Schema v2 (`158 stock + 13 prior + 63 market + 10 future returns`, 244 dimensions)
-is the default for **main and future experiments**, for **CSI300 and SP500 only**.
 CSI300 uses CN market63 (`sh000300`, `sh000852`, `sh000905`); SP500 uses US
-market63 (`^gspc`, `^dji`, `^ndx`). Market remains separate from the 158-dimensional
-stock `feature` group. The current baseline parses market63 but does not use it;
-this channel supplies infrastructure for later market-aware experiments.
+market63 (`^gspc`, `^dji`, `^ndx`). Market remains an independent group,
+separate from the 158 stock features. The current baseline parses it but does
+not use it; later experiments may study market-aware mechanisms.
 
-See [dataset/README.md](dataset/README.md) for the layout, non-overwriting v1→v2
-migration, new filenames, parser, and read-only validation commands.
+Experiments **001–006** are frozen. Reproduce their historical data/model
+conventions by checking out the corresponding branch and regenerating its
+own data; they are outside main's current dataset specification.
+
+See [dataset/README.md](dataset/README.md) for generation, naming, parsing,
+and dataset smoke checks without training.
 
 ## Baseline Results Protocol v1.0
 

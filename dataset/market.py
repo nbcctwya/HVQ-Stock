@@ -5,10 +5,11 @@ import copy
 import numpy as np
 import pandas as pd
 from qlib.contrib.data.handler import check_transform_proc
+from qlib.data.dataset import TSDataSampler
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.data.dataset.processor import Processor
 
-from dataset.schema import MARKET_INDICES, MARKET_DIM, SCHEMA_V1, SCHEMA_V2, unpack_batch
+from dataset.schema import GROUP_SLICES, MARKET_INDICES, STEP_LEN, validate_columns
 
 
 def market_feature_config(indices):
@@ -71,66 +72,42 @@ def load_market_frame(config, universe):
     return daily
 
 
-class MarketWindowSampler:
-    """Wrap an unchanged v1 TSDataSampler with a separate market calendar.
+class CanonicalSampler(TSDataSampler):
+    """Sample canonical Qlib data with a shared market trading calendar.
 
-    The v1 sampler is embedded in the new pickle, so no reference to an old
-    pickle path is required. Its sampling, fill rules and row order remain
-    exact. Market windows depend only on the endpoint date, including for
-    suspended/newly listed stocks. A missing market date fails explicitly.
+    Stock/prior/label keep Qlib's ffill+bfill sampling. Market windows are
+    selected by endpoint date, never by a stock's suspension/listing gaps.
+    Both the input DataFrame and serialized data_arr have all four groups.
     """
 
-    schema = SCHEMA_V2
-
-    def __init__(self, stock_sampler, market_frame, universe):
-        if universe not in MARKET_INDICES:
-            raise ValueError(f"Unsupported v2 universe: {universe}")
-        if len(stock_sampler) == 0:
-            raise ValueError("Cannot wrap an empty stock sampler")
-        unpack_batch(stock_sampler[0][None], version=1)
-        expected_columns = pd.MultiIndex.from_product(
+    def __init__(self, data, market_frame, universe, start, end):
+        validate_columns(data.columns)
+        expected = pd.MultiIndex.from_product(
             [["market"], market_feature_config(MARKET_INDICES[universe])[1]])
-        if not market_frame.columns.equals(expected_columns) or not market_frame.index.is_unique:
-            raise ValueError("Expected one market63 row per trading date")
-        self.stock_sampler = stock_sampler
+        if not market_frame.columns.equals(expected) or not market_frame.index.is_unique:
+            raise ValueError("Expected ordered market63 columns and one row per trading date")
+        if not np.isfinite(market_frame.to_numpy()).all():
+            raise ValueError("Market channel must be finite")
+        self.columns = data.columns.copy()
         self.universe = universe
         self.market_indices = MARKET_INDICES[universe]
-        self.step_len = stock_sampler.step_len
         self.market_frame = market_frame.sort_index()
-        self._dates = stock_sampler.get_index().get_level_values("datetime")
-        # Validate all required dates, including the complete lookback calendar.
-        calendar = stock_sampler.idx_df.index
-        missing = calendar.difference(self.market_frame.index)
+        super().__init__(data, start=start, end=end, step_len=STEP_LEN, fillna_type="ffill+bfill")
+        if not len(self):
+            raise ValueError("Cannot create an empty dataset segment")
+        missing = self.idx_df.index.difference(self.market_frame.index)
         if len(missing):
             raise ValueError(f"Missing market trading dates: {list(missing[:5])}")
-        positions = self.market_frame.index.get_indexer(self._dates)
-        if (positions < self.step_len - 1).any():
-            raise ValueError("Market history is too short for a complete window")
-        if not np.isfinite(self.market_frame.to_numpy()).all():
-            raise ValueError("Market channel must be finite")
-        self._positions = positions
-        self.columns = pd.MultiIndex.from_tuples([
-            (group, self.market_frame.columns[i][1] if group == "market" else f"{group}_{i}")
-            for group, width in self.schema.groups for i in range(width)
-        ])
-
-    def __len__(self):
-        return len(self.stock_sampler)
-
-    def get_index(self):
-        return self.stock_sampler.get_index()
-
-    def config(self, **kwargs):
-        self.stock_sampler.config(**kwargs)
+        dates = self.get_index().get_level_values("datetime")
+        self._market_positions = self.market_frame.index.get_indexer(dates)
+        if (self._market_positions < STEP_LEN - 1).any():
+            raise ValueError("Insufficient market history for a complete window")
 
     def __getitem__(self, index):
-        # Keep exact integer, vectorized and (date, instrument) sample identity.
         if isinstance(index, tuple):
             index = self.get_index().get_loc((pd.Timestamp(index[0]), index[1]))
-        old = self.stock_sampler[index]
-        endpoints = self._positions[index]
-        offsets = np.arange(1 - self.step_len, 1)
-        rows = np.asarray(endpoints)[..., None] + offsets
-        market = self.market_frame.to_numpy()[rows].astype(old.dtype, copy=False)
-        split = SCHEMA_V1.slices["label"].start
-        return np.concatenate([old[..., :split], market, old[..., SCHEMA_V1.slices["label"]]], axis=-1)
+        batch = super().__getitem__(index).copy()
+        endpoints = self._market_positions[index]
+        rows = np.asarray(endpoints)[..., None] + np.arange(1 - self.step_len, 1)
+        batch[..., GROUP_SLICES["market"]] = self.market_frame.to_numpy()[rows]
+        return batch
