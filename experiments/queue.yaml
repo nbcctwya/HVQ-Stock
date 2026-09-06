@@ -91,7 +91,7 @@ experiments:
     base: exp/007-alphamaster-baseline
     branch: exp/008-alphamaster-prior-factor-head
     commit: 82fa0a49c0c2227eba851829a12fec9aace2037a
-    status: running
+    status: done
     stage1_source: self
   - id: "009"
     name: alphamaster-temporal-market

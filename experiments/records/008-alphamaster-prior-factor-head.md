@@ -88,18 +88,22 @@ normalizer 接受。机器可读报告与日志位于
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0258
+ICIR: 0.1519
+RankIC: 0.0457
+RankICIR: 0.2664
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 7.95%（基准 6.40%，超额 1.55%）
+Sharpe: 0.4294
+Sortino: 0.6295
+MDD: -27.49%
+Calmar: 0.2892
+Turnover: 0.3272
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 82fa0a49c0c2227eba851829a12fec9aace2037a）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=9-val_loss=1.0244.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/008/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
