@@ -87,19 +87,22 @@ assignment，code counts 为 `[0,0,4,1,1,0,2,2]`，active codes 为
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0480
+ICIR: 0.2625
+RankIC: 0.0615
+RankICIR: 0.3228
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 15.09%（基准 6.40%，超额 8.69%）
+Sharpe: 0.8008
+Sortino: 1.3365
+MDD: -22.00%
+Calmar: 0.6857
+Turnover: 0.3236
 
 ## Conclusion
 
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 01e8eecd5e36de50a7dbf4604bdb1ad3d2d894c5）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=25-val_loss=1.0572.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/012/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
