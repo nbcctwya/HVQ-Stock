@@ -90,19 +90,12 @@ Notes:
 
 ## Result
 
-Status: PENDING
+Status: FAILED
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
-
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/010/run/stage2.log
 
 ## Conclusion
 
+Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/010/run/stage2.log
+
+全部 artifact 与日志保留在 `artifacts/010/run/`。

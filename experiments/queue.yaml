@@ -105,7 +105,7 @@ experiments:
     base: main
     branch: exp/010-prism-shared-routed-moe
     commit: 9b854f0436f8a7c3283fd375661dd6152cc965f1
-    status: running
+    status: failed
     stage1_source: external
     # Corrected PRISM-VQ baseline exact Stage 1 (single VQ512, seed 42).
     # This local artifact is byte-identical to the original PRISM-VQ file;
