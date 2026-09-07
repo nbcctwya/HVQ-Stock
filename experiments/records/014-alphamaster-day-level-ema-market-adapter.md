@@ -97,18 +97,22 @@ Stage 1 的结论。
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0471
+ICIR: 0.2550
+RankIC: 0.0590
+RankICIR: 0.3172
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 13.44%（基准 6.40%，超额 7.04%）
+Sharpe: 0.6457
+Sortino: 1.0565
+MDD: -29.75%
+Calmar: 0.4519
+Turnover: 0.3256
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 2fe5c384734ae553d2b6070fe9fbe5002ebfd387）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=30-val_loss=1.0424.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/014/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
