@@ -34,6 +34,8 @@ class AlphaMasterModule(pl.LightningModule):
             raise ValueError("Market adapter must be linear")
         if market_quantizer_cfg["type"] != "ema_vq":
             raise ValueError("Market quantizer must use EMA VQ")
+        if market_quantizer_cfg["statistics_level"] != "trading_day":
+            raise ValueError("EMA statistics must be updated at trading-day level")
         if market_quantizer_cfg["distance"] != "l2":
             raise ValueError("Market quantizer must use L2 nearest neighbors")
         if not market_quantizer_cfg["straight_through"]:
@@ -74,6 +76,7 @@ class AlphaMasterModule(pl.LightningModule):
             market_vq_embedding_dim=market_quantizer_cfg["embedding_dim"],
             market_vq_commitment_weight=market_quantizer_cfg["commitment_weight"],
             market_vq_decay=market_quantizer_cfg["decay"],
+            market_vq_statistics_level=market_quantizer_cfg["statistics_level"],
             market_adapter_output_size=market_adapter_cfg["output_size"],
         )
 

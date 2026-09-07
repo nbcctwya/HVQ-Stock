@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end discrete-market AlphaMaster smoke using tiny canonical PKLs."""
+"""End-to-end day-level EMA AlphaMaster smoke using tiny canonical PKLs."""
 
 import argparse
 import json
@@ -302,6 +302,36 @@ def verify_inputs(data_root):
         )
         if torch.equal(initial_parameters["codebook"], codebook_after_ema):
             raise AssertionError("codebook did not update through EMA")
+        one_state_quantizer = type(gradient_model.master.market_quantizer)(
+            codebook_size=8,
+            embedding_dim=63,
+            commitment_weight=0.25,
+            decay=0.99,
+            statistics_level="trading_day",
+        )
+        full_day_quantizer = type(gradient_model.master.market_quantizer)(
+            codebook_size=8,
+            embedding_dim=63,
+            commitment_weight=0.25,
+            decay=0.99,
+            statistics_level="trading_day",
+        )
+        full_day_quantizer.load_state_dict(one_state_quantizer.state_dict(), strict=True)
+        shared_state = zero_values["market_state"][:1]
+        one_state_quantizer.train()(shared_state)
+        full_day_quantizer.train()(shared_state.expand(len(positions), -1))
+        torch.testing.assert_close(
+            full_day_quantizer.ema_cluster_size,
+            one_state_quantizer.ema_cluster_size,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            full_day_quantizer.ema_embedding_sum,
+            one_state_quantizer.ema_embedding_sum,
+            rtol=0,
+            atol=0,
+        )
         first_loss = (
             gradient_model.loss_fn(gradient_prediction, target) + gradient_vq.loss
         )
@@ -375,6 +405,9 @@ def verify_inputs(data_root):
                 "commitment_weight": quantizer.commitment_weight,
                 "update": "ema",
                 "decay": quantizer.decay,
+                "statistics_level": quantizer.statistics_level,
+                "one_observation_per_trading_day": True,
+                "cross_section_size_invariant_ema_update": True,
                 "initial_vq_loss": float(zero_values["vq_loss"].item()),
                 "initial_codebook_loss": float(zero_values["codebook_loss"].item()),
                 "initial_commitment_loss": float(
@@ -436,7 +469,7 @@ def measure_codebook_usage(checkpoint, config, data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/013/smoke",
+        "--output-dir", default="artifacts/014/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()
@@ -450,7 +483,12 @@ def main():
     forward_results = verify_inputs(data_root)
 
     artifact_override = output_dir.relative_to(ROOT)
-    env = dict(os.environ, WANDB_MODE="offline", MPLCONFIGDIR=str(output_dir / "mpl"))
+    env = dict(
+        os.environ,
+        WANDB_MODE="offline",
+        MPLCONFIGDIR=str(output_dir / "mpl"),
+        CUDA_VISIBLE_DEVICES="",
+    )
     common = [
         f"data.data_path={data_root}",
         f"artifact_root={artifact_override}",

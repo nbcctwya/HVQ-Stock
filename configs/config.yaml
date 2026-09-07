@@ -1,4 +1,4 @@
-# AlphaMaster discrete historical-market adapter under the canonical protocol.
+# AlphaMaster day-level EMA historical-market adapter under the canonical protocol.
 # artifact_root is an execution-layer override used by experiments/runner.py.
 artifact_root: null
 
@@ -20,6 +20,7 @@ alphamaster:
     dropout: 0
   market_quantizer:
     type: ema_vq
+    statistics_level: trading_day
     codebook_size: 8
     embedding_dim: 63
     distance: l2

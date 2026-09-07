@@ -1,4 +1,4 @@
-"""EMA-quantized historical-market adapter AlphaMaster tests."""
+"""Day-level EMA-quantized historical-market adapter AlphaMaster tests."""
 
 import importlib.util
 import tempfile
@@ -71,6 +71,7 @@ class AlphaMasterTest(unittest.TestCase):
             },
             "market_quantizer": {
                 "type": "ema_vq",
+                "statistics_level": "trading_day",
                 "codebook_size": 8,
                 "embedding_dim": 63,
                 "distance": "l2",
@@ -151,6 +152,9 @@ class AlphaMasterTest(unittest.TestCase):
         self.assertEqual(model.master.market_quantizer.embedding.weight.shape, (8, 63))
         self.assertEqual(model.master.market_quantizer.commitment_weight, 0.25)
         self.assertEqual(model.master.market_quantizer.decay, 0.99)
+        self.assertEqual(
+            model.master.market_quantizer.statistics_level, "trading_day"
+        )
         self.assertFalse(model.master.market_quantizer.embedding.weight.requires_grad)
         torch.testing.assert_close(
             captured["vq_input"], captured["market_state"], rtol=0, atol=0
@@ -239,11 +243,11 @@ class AlphaMasterTest(unittest.TestCase):
             quantizer.embedding.weight.copy_(initial)
             quantizer.ema_embedding_sum.copy_(initial)
             quantizer.ema_cluster_size.fill_(1.0)
-        inputs = torch.tensor([[2.0, 4.0], [4.0, 6.0]])
+        inputs = torch.tensor([[2.0, 4.0], [2.0, 4.0]])
         output = quantizer.train()(inputs)
         self.assertTrue(torch.equal(output.indices, torch.zeros(2, dtype=torch.long)))
-        expected_counts = torch.tensor([1.01, 0.99])
-        expected_sums = torch.tensor([[0.06, 0.10], [9.90, 9.90]])
+        expected_counts = torch.tensor([1.00, 0.99])
+        expected_sums = torch.tensor([[0.02, 0.04], [9.90, 9.90]])
         torch.testing.assert_close(quantizer.ema_cluster_size, expected_counts)
         torch.testing.assert_close(quantizer.ema_embedding_sum, expected_sums)
         torch.testing.assert_close(
@@ -255,6 +259,51 @@ class AlphaMasterTest(unittest.TestCase):
         quantizer.eval()(torch.tensor([[100.0, 100.0]]))
         torch.testing.assert_close(quantizer.embedding.weight, trained_weight, rtol=0, atol=0)
         torch.testing.assert_close(quantizer.ema_cluster_size, trained_counts, rtol=0, atol=0)
+
+    def test_ema_statistics_are_invariant_to_cross_section_size(self):
+        torch.manual_seed(23)
+        one_stock = EMAVectorQuantizer(
+            codebook_size=8,
+            embedding_dim=63,
+            commitment_weight=0.25,
+            decay=0.99,
+        )
+        full_cross_section = EMAVectorQuantizer(
+            codebook_size=8,
+            embedding_dim=63,
+            commitment_weight=0.25,
+            decay=0.99,
+        )
+        full_cross_section.load_state_dict(one_stock.state_dict(), strict=True)
+        shared_state = torch.randn(1, 63)
+
+        one_output = one_stock.train()(shared_state)
+        full_output = full_cross_section.train()(shared_state.expand(257, -1))
+
+        self.assertEqual(one_output.indices.numel(), 1)
+        self.assertEqual(full_output.indices.numel(), 257)
+        self.assertTrue(torch.equal(
+            full_output.indices,
+            one_output.indices.expand_as(full_output.indices),
+        ))
+        torch.testing.assert_close(
+            full_cross_section.ema_cluster_size,
+            one_stock.ema_cluster_size,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            full_cross_section.ema_embedding_sum,
+            one_stock.ema_embedding_sum,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            full_cross_section.embedding.weight,
+            one_stock.embedding.weight,
+            rtol=0,
+            atol=0,
+        )
 
     def test_market_paths_are_decoupled(self):
         model = AlphaMasterModule(load_config()).eval()

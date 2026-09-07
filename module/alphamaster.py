@@ -192,7 +192,7 @@ class VectorQuantizerOutput(NamedTuple):
 
 
 class EMAVectorQuantizer(nn.Module):
-    """L2 nearest-neighbor VQ with EMA codebook updates and an STE."""
+    """L2 VQ whose EMA statistics count one shared state per trading day."""
 
     def __init__(
         self,
@@ -200,6 +200,7 @@ class EMAVectorQuantizer(nn.Module):
         embedding_dim=63,
         commitment_weight=0.25,
         decay=0.99,
+        statistics_level="trading_day",
     ):
         super().__init__()
         if codebook_size <= 0 or embedding_dim <= 0:
@@ -208,10 +209,13 @@ class EMAVectorQuantizer(nn.Module):
             raise ValueError("VQ commitment weight must be non-negative")
         if not 0.0 <= decay < 1.0:
             raise ValueError("EMA decay must be in [0, 1)")
+        if statistics_level != "trading_day":
+            raise ValueError("EMA statistics must be updated at trading-day level")
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
         self.commitment_weight = commitment_weight
         self.decay = decay
+        self.statistics_level = statistics_level
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
         nn.init.uniform_(
             self.embedding.weight,
@@ -271,7 +275,11 @@ class EMAVectorQuantizer(nn.Module):
         quantized_st = quantized.detach() + (inputs - inputs.detach())
         indices = flat_indices.view(inputs.shape[:-1])
         if self.training:
-            self._update_codebook(flat_inputs, flat_indices)
+            # DailyBatchSamplerRandom supplies exactly one complete trading-day
+            # cross-section per forward. Its rows share the same historical
+            # market state, so the first row is the day's single EMA
+            # observation; cross-section size must not weight the prototype.
+            self._update_codebook(flat_inputs[:1], flat_indices[:1])
         return VectorQuantizerOutput(
             quantized_st,
             loss,
@@ -314,6 +322,7 @@ class MASTER(nn.Module):
         market_vq_embedding_dim=63,
         market_vq_commitment_weight=0.25,
         market_vq_decay=0.99,
+        market_vq_statistics_level="trading_day",
         market_adapter_output_size=256,
     ):
         super().__init__()
@@ -360,6 +369,7 @@ class MASTER(nn.Module):
             embedding_dim=market_vq_embedding_dim,
             commitment_weight=market_vq_commitment_weight,
             decay=market_vq_decay,
+            statistics_level=market_vq_statistics_level,
         )
 
     def forward(self, x, return_vq_output=False):
