@@ -76,6 +76,7 @@ predictor:
   n_expert: 2
   pred_len: 20  
   moe_hidden: 64 
+  shared_expert: true  # 010: always-on zero-initialized residual expert
   dropout: 0.1
 
   transformer:

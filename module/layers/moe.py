@@ -156,6 +156,7 @@ class FactorGatedMoE(nn.Module):
                  num_experts: int = 4, 
                  noisy_gating: bool = True,  
                  k=2,
+                 use_shared_expert: bool = False,
                  ):
         super(FactorGatedMoE, self).__init__()
         self.gate_input_size = gate_input_size
@@ -164,6 +165,7 @@ class FactorGatedMoE(nn.Module):
         self.num_experts = num_experts
         self.noisy_gating = noisy_gating
         self.k = k
+        self.use_shared_expert = use_shared_expert
         
         self.experts = nn.ModuleList([
             SimpleMLP(expert_input_size, expert_input_size, hidden_size) 
@@ -189,6 +191,19 @@ class FactorGatedMoE(nn.Module):
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
         assert self.k <= self.num_experts
+
+        # The always-on shared path is deliberately created after every
+        # routed-path parameter so enabling it cannot perturb routed branch
+        # initialization under an identical random seed.
+        if self.use_shared_expert:
+            self.shared_expert = SimpleMLP(
+                expert_input_size, expert_input_size, hidden_size
+            )
+            final_linear = self.shared_expert.net[-1]
+            nn.init.zeros_(final_linear.weight)
+            nn.init.zeros_(final_linear.bias)
+        else:
+            self.shared_expert = None
 
     def cv_squared(self, x):
         """The squared coefficient of variation of a sample.
@@ -322,7 +337,13 @@ class FactorGatedMoE(nn.Module):
         expert_outputs = [
             self.experts[i](expert_inputs[i]) for i in range(self.num_experts)
         ]
-        y = dispatcher.combine(expert_outputs)
+        routed_out = dispatcher.combine(expert_outputs)
+
+        if self.shared_expert is not None:
+            shared_out = self.shared_expert(x)
+            y = shared_out + routed_out
+        else:
+            y = routed_out
 
         return y, loss
     

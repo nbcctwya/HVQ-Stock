@@ -53,6 +53,7 @@ class LoadingGenerator(nn.Module):
             moe_k=config['predictor']['k'],
             hidden_size=config['predictor']['moe_hidden'],
             drop=config['predictor']['dropout'],
+            use_shared_expert=config['predictor'].get('shared_expert', False),
         )
 
     def forward(self, feature, z_q):
