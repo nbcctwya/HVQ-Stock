@@ -124,7 +124,7 @@ experiments:
     base: exp/011-alphamaster-continuous-market-adapter
     branch: exp/012-alphamaster-discrete-market-adapter
     commit: 01e8eecd5e36de50a7dbf4604bdb1ad3d2d894c5
-    status: pending
+    status: running
     stage1_source: self
   - id: "013"
     name: alphamaster-ema-market-adapter
