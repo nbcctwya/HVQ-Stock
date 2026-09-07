@@ -1,14 +1,17 @@
-"""AlphaMaster with an independent historical-market decoder adapter.
+"""AlphaMaster with a discrete historical-market decoder adapter.
 
 The original current-market feature gate and complete stock backbone are kept
-intact.  A lightweight GRU encodes the previous 19 market observations and a
-zero-initialized linear hypernetwork adds a dynamic decoder-weight residual.
+intact. A lightweight GRU encodes the previous 19 market observations, a
+standard vector quantizer maps the continuous state to a reusable regime, and
+a zero-initialized linear hypernetwork adds a decoder-weight residual.
 """
 
 import math
+from typing import NamedTuple
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.linear import Linear
 from torch.nn.modules.normalization import LayerNorm
@@ -180,6 +183,66 @@ class TemporalMarketEncoder(nn.Module):
         return last_hidden[-1]
 
 
+class VectorQuantizerOutput(NamedTuple):
+    quantized: torch.Tensor
+    loss: torch.Tensor
+    codebook_loss: torch.Tensor
+    commitment_loss: torch.Tensor
+    indices: torch.Tensor
+
+
+class StandardVectorQuantizer(nn.Module):
+    """L2 nearest-neighbor VQ with a standard straight-through estimator."""
+
+    def __init__(self, codebook_size=8, embedding_dim=63, commitment_weight=0.25):
+        super().__init__()
+        if codebook_size <= 0 or embedding_dim <= 0:
+            raise ValueError("VQ codebook size and embedding dimension must be positive")
+        if commitment_weight < 0:
+            raise ValueError("VQ commitment weight must be non-negative")
+        self.codebook_size = codebook_size
+        self.embedding_dim = embedding_dim
+        self.commitment_weight = commitment_weight
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+        nn.init.uniform_(
+            self.embedding.weight,
+            -1.0 / codebook_size,
+            1.0 / codebook_size,
+        )
+
+    def forward(self, inputs):
+        if inputs.shape[-1] != self.embedding_dim:
+            raise ValueError(
+                f"Expected VQ inputs with width {self.embedding_dim}, "
+                f"got {inputs.shape[-1]}"
+            )
+        flat_inputs = inputs.reshape(-1, self.embedding_dim)
+        codebook = self.embedding.weight
+        distances = (
+            flat_inputs.square().sum(dim=1, keepdim=True)
+            + codebook.square().sum(dim=1).unsqueeze(0)
+            - 2.0 * flat_inputs @ codebook.t()
+        )
+        flat_indices = torch.argmin(distances, dim=1)
+        quantized = self.embedding(flat_indices).view_as(inputs)
+
+        codebook_loss = F.mse_loss(quantized, inputs.detach())
+        commitment_loss = F.mse_loss(inputs, quantized.detach())
+        loss = codebook_loss + self.commitment_weight * commitment_loss
+        # Forward values are exactly the selected embeddings, while gradients
+        # to the encoder are the identity. This equivalent STE form also makes
+        # every member of one cross-section bitwise-share its regime vector.
+        quantized_st = quantized.detach() + (inputs - inputs.detach())
+        indices = flat_indices.view(inputs.shape[:-1])
+        return VectorQuantizerOutput(
+            quantized_st,
+            loss,
+            codebook_loss,
+            commitment_loss,
+            indices,
+        )
+
+
 class TemporalAttention(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -209,6 +272,9 @@ class MASTER(nn.Module):
         market_encoder_hidden_size=63,
         market_encoder_num_layers=1,
         market_encoder_dropout=0.0,
+        market_vq_codebook_size=8,
+        market_vq_embedding_dim=63,
+        market_vq_commitment_weight=0.25,
         market_adapter_output_size=256,
     ):
         super().__init__()
@@ -246,8 +312,17 @@ class MASTER(nn.Module):
             bias=False,
         )
         nn.init.zeros_(self.market_adapter.weight)
+        # Construct VQ after all 011 modules so their seeded initialization is
+        # unchanged; only the formal forward graph gains this new module.
+        if market_vq_embedding_dim != market_encoder_hidden_size:
+            raise ValueError("VQ embedding dimension must match market state width")
+        self.market_quantizer = StandardVectorQuantizer(
+            codebook_size=market_vq_codebook_size,
+            embedding_dim=market_vq_embedding_dim,
+            commitment_weight=market_vq_commitment_weight,
+        )
 
-    def forward(self, x):
+    def forward(self, x, return_vq_output=False):
         src = x[:, :, :self.gate_input_start_index]
         gate_input = x[
             :, -1, self.gate_input_start_index:self.gate_input_end_index
@@ -263,7 +338,11 @@ class MASTER(nn.Module):
         x = self.satten(x)
         h = self.temporalatten(x)
         market_state = self.market_encoder(market_history)
-        delta_weight = self.market_adapter(market_state)
+        vq_output = self.market_quantizer(market_state)
+        delta_weight = self.market_adapter(vq_output.quantized)
         y_base = self.decoder(h).squeeze(-1)
         y_market = torch.sum(delta_weight * h, dim=-1)
-        return y_base + y_market
+        prediction = y_base + y_market
+        if return_vq_output:
+            return prediction, vq_output
+        return prediction

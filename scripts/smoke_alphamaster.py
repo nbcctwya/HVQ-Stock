@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end AlphaMaster smoke using tiny canonical PKLs."""
+"""End-to-end discrete-market AlphaMaster smoke using tiny canonical PKLs."""
 
 import argparse
 import json
@@ -119,9 +119,24 @@ def verify_inputs(data_root):
                         "market_state", output.detach().clone()
                     )
                 ),
+                candidate_model.master.market_quantizer.register_forward_hook(
+                    lambda module, args, output: values.update({
+                        "vq_input": args[0].detach().clone(),
+                        "quantized_state": output.quantized.detach().clone(),
+                        "code_indices": output.indices.detach().clone(),
+                        "vq_loss": output.loss.detach().clone(),
+                        "codebook_loss": output.codebook_loss.detach().clone(),
+                        "commitment_loss": output.commitment_loss.detach().clone(),
+                    })
+                ),
                 candidate_model.master.temporalatten.register_forward_hook(
                     lambda module, args, output: values.__setitem__(
                         "hidden", output.detach().clone()
+                    )
+                ),
+                candidate_model.master.market_adapter.register_forward_pre_hook(
+                    lambda module, args: values.__setitem__(
+                        "adapter_input", args[0].detach().clone()
                     )
                 ),
                 candidate_model.master.market_adapter.register_forward_hook(
@@ -143,6 +158,12 @@ def verify_inputs(data_root):
             raise AssertionError("historical market input is not [N,19,63]")
         if zero_values["market_state"].shape != (len(positions), 63):
             raise AssertionError("market state is not [N,63]")
+        if zero_values["vq_input"].shape != (len(positions), 63):
+            raise AssertionError("VQ input is not [N,63]")
+        if zero_values["quantized_state"].shape != (len(positions), 63):
+            raise AssertionError("quantized market state is not [N,63]")
+        if zero_values["code_indices"].shape != (len(positions),):
+            raise AssertionError("VQ indices are not [N]")
         if zero_values["hidden"].shape != (len(positions), 256):
             raise AssertionError("TemporalAttention hidden is not [N,256]")
         if zero_values["delta_weight"].shape != (len(positions), 256):
@@ -155,6 +176,15 @@ def verify_inputs(data_root):
             zero_values["history"], parts.market_feature[:, :-1, :],
             rtol=0, atol=0,
         )
+        torch.testing.assert_close(
+            zero_values["vq_input"], zero_values["market_state"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            zero_values["adapter_input"], zero_values["quantized_state"],
+            rtol=0, atol=0,
+        )
+        if not torch.isfinite(zero_values["vq_loss"]):
+            raise AssertionError("VQ loss is not finite")
         if torch.count_nonzero(model.master.market_adapter.weight):
             raise AssertionError("Market Adapter is not zero-initialized")
         if torch.count_nonzero(zero_values["delta_weight"]):
@@ -179,8 +209,32 @@ def verify_inputs(data_root):
             rtol=1e-5,
             atol=2e-7,
         )
+        torch.testing.assert_close(
+            zero_values["quantized_state"],
+            zero_values["quantized_state"][:1].expand_as(
+                zero_values["quantized_state"]
+            ),
+            rtol=0,
+            atol=0,
+        )
+        if not torch.equal(
+            zero_values["code_indices"],
+            zero_values["code_indices"][:1].expand_as(zero_values["code_indices"]),
+        ):
+            raise AssertionError("cross-section did not share one VQ regime")
 
+        changed_history = parts.market_feature.clone()
+        changed_history[:, :-1, 0] += 10
         with torch.no_grad():
+            original_state = model.master.market_encoder(
+                parts.market_feature[:, :-1, :]
+            )[0]
+            changed_state = model.master.market_encoder(
+                changed_history[:, :-1, :]
+            )[0]
+            model.master.market_quantizer.embedding.weight.fill_(1000)
+            model.master.market_quantizer.embedding.weight[0].copy_(original_state)
+            model.master.market_quantizer.embedding.weight[1].copy_(changed_state)
             model.master.market_adapter.weight.normal_(std=0.01)
         original = capture_forward(model, parts.stock_feature, parts.market_feature)
         torch.testing.assert_close(
@@ -189,15 +243,21 @@ def verify_inputs(data_root):
             rtol=1e-5,
             atol=2e-7,
         )
+        torch.testing.assert_close(
+            original["quantized_state"],
+            original["quantized_state"][:1].expand_as(original["quantized_state"]),
+            rtol=0,
+            atol=0,
+        )
 
-        changed_history = parts.market_feature.clone()
-        changed_history[:, :-1, 0] += 10
         historical = capture_forward(model, parts.stock_feature, changed_history)
         torch.testing.assert_close(
             historical["gate_input"], original["gate_input"], rtol=0, atol=0
         )
         if torch.equal(historical["delta_weight"], original["delta_weight"]):
             raise AssertionError("historical market did not change dynamic weights")
+        if torch.equal(historical["code_indices"], original["code_indices"]):
+            raise AssertionError("controlled histories did not select different regimes")
         if torch.equal(historical["prediction"], original["prediction"]):
             raise AssertionError("historical market did not affect prediction")
 
@@ -211,6 +271,12 @@ def verify_inputs(data_root):
             current["market_state"], original["market_state"], rtol=0, atol=0
         )
         torch.testing.assert_close(
+            current["quantized_state"], original["quantized_state"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            current["code_indices"], original["code_indices"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
             current["delta_weight"], original["delta_weight"], rtol=0, atol=0
         )
         if torch.equal(current["gate_input"], original["gate_input"]):
@@ -221,41 +287,53 @@ def verify_inputs(data_root):
         gradient_model = AlphaMasterModule(config).train()
         optimizer = torch.optim.SGD(gradient_model.parameters(), lr=0.1)
         target = parts.target(config["predictor"]["target_day"])
-        first_loss = gradient_model.loss_fn(
-            gradient_model(parts.stock_feature, parts.market_feature), target
-        )
-        first_loss.backward()
-        adapter_grad_l1 = (
-            gradient_model.master.market_adapter.weight.grad.abs().sum().item()
-        )
-        if adapter_grad_l1 <= 0:
-            raise AssertionError("Market Adapter did not receive prediction gradient")
-        optimizer.step()
-        adapter_weight_l1 = (
-            gradient_model.master.market_adapter.weight.detach().abs().sum().item()
-        )
-        if adapter_weight_l1 <= 0:
-            raise AssertionError("Market Adapter did not update from zero")
-        optimizer.zero_grad(set_to_none=True)
-        second_loss = gradient_model.loss_fn(
-            gradient_model(parts.stock_feature, parts.market_feature), target
-        )
-        second_loss.backward()
-        gru_gradients = {
-            name: parameter.grad.abs().sum().item()
-            for name, parameter in gradient_model.master.market_encoder.named_parameters()
-            if parameter.grad is not None
+        initial_parameters = {
+            "adapter": gradient_model.master.market_adapter.weight.detach().clone(),
+            "codebook": gradient_model.master.market_quantizer.embedding.weight.detach().clone(),
+            "gru": gradient_model.master.market_encoder.gru.weight_ih_l0.detach().clone(),
         }
-        if not gru_gradients or sum(gru_gradients.values()) <= 0:
-            raise AssertionError("prediction loss did not reach the GRU")
+        gradient_prediction, gradient_vq = gradient_model(
+            parts.stock_feature,
+            parts.market_feature,
+            return_vq_output=True,
+        )
+        first_loss = (
+            gradient_model.loss_fn(gradient_prediction, target) + gradient_vq.loss
+        )
+        if not torch.isfinite(first_loss):
+            raise AssertionError("combined prediction + VQ loss is not finite")
+        first_loss.backward()
+        gradients = {
+            "adapter": gradient_model.master.market_adapter.weight.grad,
+            "codebook": gradient_model.master.market_quantizer.embedding.weight.grad,
+            "gru": gradient_model.master.market_encoder.gru.weight_ih_l0.grad,
+        }
+        gradient_l1 = {}
+        for name, gradient in gradients.items():
+            if gradient is None or gradient.abs().sum().item() <= 0:
+                raise AssertionError(f"{name} did not receive a valid gradient")
+            gradient_l1[name] = gradient.abs().sum().item()
+        optimizer.step()
+        updated_parameters = {
+            "adapter": gradient_model.master.market_adapter.weight,
+            "codebook": gradient_model.master.market_quantizer.embedding.weight,
+            "gru": gradient_model.master.market_encoder.gru.weight_ih_l0,
+        }
+        for name, parameter in updated_parameters.items():
+            if torch.equal(initial_parameters[name], parameter):
+                raise AssertionError(f"{name} did not update")
 
         gru = model.master.market_encoder.gru
+        quantizer = model.master.market_quantizer
         results[universe] = {
             "input_shape": list(batch.shape),
             "stock_shape": list(parts.stock_feature.shape),
             "market_shape": list(parts.market_feature.shape),
             "historical_market_shape": list(zero_values["history"].shape),
             "market_state_shape": list(zero_values["market_state"].shape),
+            "vq_input_shape": list(zero_values["vq_input"].shape),
+            "quantized_state_shape": list(zero_values["quantized_state"].shape),
+            "code_indices_shape": list(zero_values["code_indices"].shape),
             "hidden_shape": list(zero_values["hidden"].shape),
             "delta_weight_shape": list(zero_values["delta_weight"].shape),
             "prediction_shape": list(prediction.shape),
@@ -271,7 +349,7 @@ def verify_inputs(data_root):
             "current_market_sensitive_through_feature_gate": True,
             "paths_decoupled": True,
             "single_day_cross_section": True,
-            "cross_section_shared_market_state_and_delta_weight": True,
+            "cross_section_shared_market_state_quantized_regime_and_delta_weight": True,
             "market_encoder": {
                 "input_size": gru.input_size,
                 "hidden_size": gru.hidden_size,
@@ -280,22 +358,73 @@ def verify_inputs(data_root):
                 "bidirectional": gru.bidirectional,
                 "dropout": gru.dropout,
             },
+            "market_quantizer": {
+                "codebook_size": quantizer.codebook_size,
+                "embedding_dim": quantizer.embedding_dim,
+                "distance": "l2",
+                "straight_through": True,
+                "commitment_weight": quantizer.commitment_weight,
+                "initial_vq_loss": float(zero_values["vq_loss"].item()),
+                "initial_codebook_loss": float(zero_values["codebook_loss"].item()),
+                "initial_commitment_loss": float(
+                    zero_values["commitment_loss"].item()
+                ),
+                "controlled_history_regime_changed": True,
+                "first_gradient_l1": gradient_l1["codebook"],
+            },
             "market_adapter": {
                 "input_size": model.master.market_adapter.in_features,
                 "output_size": model.master.market_adapter.out_features,
                 "bias": model.master.market_adapter.bias is not None,
-                "adapter_first_gradient_l1": adapter_grad_l1,
-                "adapter_after_step_weight_l1": adapter_weight_l1,
-                "gru_second_gradient_l1": sum(gru_gradients.values()),
+                "adapter_first_gradient_l1": gradient_l1["adapter"],
+                "gru_first_gradient_l1": gradient_l1["gru"],
+                "vq_gru_adapter_updated": True,
             },
         }
     return results
 
 
+def measure_codebook_usage(checkpoint, config, data_root):
+    """Count one regime assignment per trading day after minimal training."""
+    model = AlphaMasterModule.load_strict_checkpoint(checkpoint, config).eval()
+    path = data_root / "CN" / "csi300_20_h10_test.pkl"
+    with path.open("rb") as stream:
+        dataset = pickle.load(stream)
+    dates = dataset.get_index().get_level_values("datetime")
+    assignments = []
+    with torch.no_grad():
+        for date in dates.unique():
+            positions = np.flatnonzero(dates == date)
+            batch = torch.as_tensor(dataset[positions]).float()
+            parts = unpack_batch(batch)
+            _, vq_output = model(
+                parts.stock_feature,
+                parts.market_feature,
+                return_vq_output=True,
+            )
+            if not torch.equal(
+                vq_output.indices,
+                vq_output.indices[:1].expand_as(vq_output.indices),
+            ):
+                raise AssertionError(f"cross-section has multiple regimes on {date}")
+            assignments.append(int(vq_output.indices[0].item()))
+    counts = np.bincount(assignments, minlength=model.master.market_quantizer.codebook_size)
+    active_codes = np.flatnonzero(counts).tolist()
+    return {
+        "level": "trading_day",
+        "total_assignments": len(assignments),
+        "code_counts": counts.tolist(),
+        "active_codes": active_codes,
+        "active_code_count": len(active_codes),
+        "active_fraction": len(active_codes) / len(counts),
+        "all_cross_sections_share_one_regime": True,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/011/smoke",
+        "--output-dir", default="artifacts/012/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()
@@ -348,6 +477,7 @@ def main():
     with (ROOT / "configs" / "config.yaml").open() as stream:
         config = yaml.safe_load(stream)
     AlphaMasterModule.load_strict_checkpoint(checkpoint, config)
+    codebook_usage = measure_codebook_usage(checkpoint, config, data_root)
 
     report = {
         "status": "PASS",
@@ -356,6 +486,7 @@ def main():
             "checkpoint": str(checkpoint.relative_to(ROOT)),
             "runner_discovery": True,
             "minimal_training": True,
+            "codebook_usage": codebook_usage,
         },
         "stage2": {
             "strict_checkpoint_load": True,

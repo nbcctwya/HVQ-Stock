@@ -13,7 +13,7 @@ from utils.test import Cal_IC_IR
 
 
 class AlphaMasterModule(pl.LightningModule):
-    """AlphaMaster with current-gate and historical-adapter market paths."""
+    """AlphaMaster with current-gate and discrete historical-adapter paths."""
 
     def __init__(self, config):
         super().__init__()
@@ -22,6 +22,7 @@ class AlphaMasterModule(pl.LightningModule):
         universe = config["data"]["universe"]
         beta = model_cfg["beta"][universe]
         market_encoder_cfg = model_cfg["market_encoder"]
+        market_quantizer_cfg = model_cfg["market_quantizer"]
         market_adapter_cfg = model_cfg["market_adapter"]
         if market_encoder_cfg["type"] != "gru":
             raise ValueError("Temporal market encoder must be 'gru'")
@@ -31,8 +32,16 @@ class AlphaMasterModule(pl.LightningModule):
             raise ValueError("Temporal market encoder must be unidirectional")
         if market_adapter_cfg["type"] != "linear":
             raise ValueError("Market adapter must be linear")
-        if market_adapter_cfg["input_size"] != market_encoder_cfg["hidden_size"]:
-            raise ValueError("Market adapter input must match market state width")
+        if market_quantizer_cfg["type"] != "standard_vq":
+            raise ValueError("Market quantizer must be standard VQ")
+        if market_quantizer_cfg["distance"] != "l2":
+            raise ValueError("Market quantizer must use L2 nearest neighbors")
+        if not market_quantizer_cfg["straight_through"]:
+            raise ValueError("Market quantizer must use straight-through estimation")
+        if market_quantizer_cfg["embedding_dim"] != market_encoder_cfg["hidden_size"]:
+            raise ValueError("VQ embedding dimension must match market state width")
+        if market_adapter_cfg["input_size"] != market_quantizer_cfg["embedding_dim"]:
+            raise ValueError("Market adapter input must match quantized state width")
         if market_adapter_cfg["bias"]:
             raise ValueError("Market adapter must not use bias")
         if not market_adapter_cfg["zero_init"]:
@@ -61,17 +70,23 @@ class AlphaMasterModule(pl.LightningModule):
             market_encoder_hidden_size=market_encoder_cfg["hidden_size"],
             market_encoder_num_layers=market_encoder_cfg["num_layers"],
             market_encoder_dropout=market_encoder_cfg["dropout"],
+            market_vq_codebook_size=market_quantizer_cfg["codebook_size"],
+            market_vq_embedding_dim=market_quantizer_cfg["embedding_dim"],
+            market_vq_commitment_weight=market_quantizer_cfg["commitment_weight"],
             market_adapter_output_size=market_adapter_cfg["output_size"],
         )
 
-    def forward(self, stock_feature, market_feature):
+    def forward(self, stock_feature, market_feature, return_vq_output=False):
         if stock_feature.shape[:-1] != market_feature.shape[:-1]:
             raise ValueError("stock and market tensors must share [N,T]")
         if stock_feature.shape[-1] != self.stock_dim:
             raise ValueError(f"Expected {self.stock_dim} stock features")
         if market_feature.shape[-1] != self.market_dim:
             raise ValueError(f"Expected {self.market_dim} market features")
-        return self.master(torch.cat([stock_feature, market_feature], dim=-1))
+        return self.master(
+            torch.cat([stock_feature, market_feature], dim=-1),
+            return_vq_output=return_vq_output,
+        )
 
     def _get_data(self, batch, batch_idx=0):
         parts = unpack_batch(batch.float())
@@ -92,18 +107,38 @@ class AlphaMasterModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         stock, market, target = self._get_data(batch, batch_idx)
-        loss = self.loss_fn(self(stock, market), target)
+        prediction, vq_output = self(stock, market, return_vq_output=True)
+        prediction_loss = self.loss_fn(prediction, target)
+        loss = prediction_loss + vq_output.loss
         self.log(
             "train_loss", loss, on_step=True, on_epoch=True,
+            logger=True, sync_dist=True, batch_size=target.numel(),
+        )
+        self.log(
+            "train_prediction_loss", prediction_loss, on_step=True, on_epoch=True,
+            logger=True, sync_dist=True, batch_size=target.numel(),
+        )
+        self.log(
+            "train_vq_loss", vq_output.loss, on_step=True, on_epoch=True,
             logger=True, sync_dist=True, batch_size=target.numel(),
         )
         return loss
 
     def validation_step(self, batch, batch_idx):
         stock, market, target = self._get_data(batch, batch_idx)
-        loss = self.loss_fn(self(stock, market), target)
+        prediction, vq_output = self(stock, market, return_vq_output=True)
+        prediction_loss = self.loss_fn(prediction, target)
+        loss = prediction_loss + vq_output.loss
         self.log(
             "val_loss", loss, on_step=False, on_epoch=True,
+            logger=True, sync_dist=True, batch_size=target.numel(),
+        )
+        self.log(
+            "val_prediction_loss", prediction_loss, on_step=False, on_epoch=True,
+            logger=True, sync_dist=True, batch_size=target.numel(),
+        )
+        self.log(
+            "val_vq_loss", vq_output.loss, on_step=False, on_epoch=True,
             logger=True, sync_dist=True, batch_size=target.numel(),
         )
         return loss

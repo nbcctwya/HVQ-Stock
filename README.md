@@ -1,73 +1,75 @@
-# 011 — AlphaMaster Continuous Market Adapter
+# 012 — AlphaMaster Discrete Market Adapter
 
 ## Base
 
-`exp/007-alphamaster-baseline`
+`exp/011-alphamaster-continuous-market-adapter`
 
 ## Idea / Motivation
 
-007 uses the current market snapshot to gate and reweight stock features before
-the AlphaMaster backbone. This experiment keeps that path intact and asks a
-separate question: can the preceding 19-day market trajectory condition the
-final prediction function after AlphaMaster has extracted its 256-dimensional
-stock representation?
+Experiment 011 conditions the prediction-side Market Adapter directly on a
+continuous 63-dimensional state produced from the previous 19 market days.
+This experiment asks whether compressing that state into one of a small number
+of reusable regimes filters market noise and improves prediction-side
+adaptation.
 
-The two market signals have deliberately different roles. The current day
-controls stock-feature selection; historical market state supplies a dynamic
-decoder-weight residual.
+The current-day and historical market signals retain separate roles. The
+current day controls the original input-side Feature Gate; only the historical
+GRU state is quantized before it reaches the existing Market Adapter.
 
 ## Core modification
 
-The original 007 path remains:
-
-```text
-market[:, -1, :] -> Feature Gate -> stock158 -> AlphaMaster backbone
--> h[256] -> original decoder -> y_base
-```
-
-The only added path is:
+The complete 011 path remains, with one standard VQ inserted between its GRU
+and adapter:
 
 ```text
 market[:, :-1, :] [N,19,63]
--> single-layer GRU -> m_t [N,63]
--> Linear(63,256,bias=False), zero-initialized -> delta_w_t [N,256]
+-> unchanged single-layer GRU -> m_t [N,63]
+-> standard VQ (8 codes, embedding_dim=63) -> z_q [N,63]
+-> unchanged Linear(63,256,bias=False), zero-initialized -> delta_w_t [N,256]
 -> dot(delta_w_t, h) -> y_market
 ```
 
-The final prediction is `y_base + y_market`. The adapter weight is explicitly
-zero-initialized, so a newly initialized 011 model is exactly prediction-
-equivalent to 007 when the backbone parameters match. The adapter first learns
-a prediction-side correction; once it becomes nonzero, prediction loss also
-propagates into the GRU.
+Quantization uses squared L2 nearest-neighbor assignment, a standard
+straight-through estimator, and the loss
+`codebook_mse + 0.25 * commitment_mse`. The selected embedding is the exact
+forward value, while the straight-through path sends prediction gradients to
+the GRU. VQ loss is added to the unchanged prediction MSE during Stage 1.
 
-The temporal market encoder matches experiment 009's lightweight GRU:
-`input_size=63`, `hidden_size=63`, `num_layers=1`, `batch_first=True`,
-`bidirectional=False`, and `dropout=0`.
+The canonical daily sampler emits one complete trading-day cross-section per
+batch. Because all stocks on that day share the same historical market window,
+they select the same code and receive the exact same quantized regime vector.
 
 ## Difference from base
 
-- Added only the previous-19-day GRU and zero-initialized linear Market Adapter
-  residual on the prediction side.
-- The original current-market Feature Gate still receives exactly
-  `market[:, -1, :]` and is not replaced by the GRU state.
-- The historical branch receives exactly `market[:, :-1, :]`; it does not see
-  the current day.
-- The Feature Gate, projection, positional encoding, temporal/spatial
-  attention, TemporalAttention, and original decoder are unchanged.
-- The canonical `158 + 13 + 63 + 10 = 244` schema, `T=20`, unused prior13
-  behavior, model dimensions, dropout, beta, target day, optimizer, splits,
-  seeds, training budget, metrics, and backtest protocol remain those of 007.
-- Stage 1 provenance is `self`, because the GRU and Market Adapter are new
-  trainable parameters and must be trained through the AlphaMaster pipeline.
+- Added only a trainable `8 x 63` standard VQ codebook between the existing GRU
+  output and existing Market Adapter input, plus its standard VQ loss.
+- The 011 GRU is unchanged: `input_size=63`, `hidden_size=63`, `num_layers=1`,
+  `batch_first=True`, unidirectional, and dropout 0.
+- The Market Adapter remains `Linear(63,256,bias=False)` with explicit zero
+  initialization, and the decoder residual equation remains unchanged.
+- The original Feature Gate still and only receives `market[:, -1, :]`; the
+  GRU/VQ branch still and only receives `market[:, :-1, :]`.
+- The MASTER backbone, original decoder, canonical `158 + 13 + 63 + 10 = 244`
+  schema, `T=20`, unused prior13 behavior, splits, model dimensions, dropout,
+  beta, target day, optimizer, seeds, training budget, early stopping, metrics,
+  and Top30/Drop5 backtest protocol are unchanged from 011.
+- Stage 1 provenance is `self`, because VQ is newly trainable and changes the
+  formal forward graph, so the complete model must be retrained.
 
 ## Smoke status
 
-PASS. The full unit suite passes 91/91 tests. The isolated smoke run validates
-canonical shapes, exact current/history slicing, GRU/hidden/adapter shapes,
-zero initialization, exact zero-init 007 prediction equivalence, same-day
-cross-sectional market-state sharing, current/history path decoupling, adapter
-update, subsequent GRU gradients, strict Stage 1 to Stage 2 checkpoint loading,
-and standard prediction/metric compatibility with the existing backtest
-normalizer.
+PASS. The full unit suite passes 92/92 tests. Tests and the isolated smoke cover
+canonical GRU/VQ/Adapter shapes, the exact configured VQ dimensions and loss,
+straight-through gradients, zero initialization, exact initial prediction
+equivalence, same-day quantized-regime sharing, current/history path isolation,
+VQ/GRU/Adapter gradients and parameter updates, strict checkpoint save/load,
+Stage 1 to Stage 2 inference, and compatibility with the existing prediction
+and backtest interfaces.
 
-Artifacts and logs are isolated under `artifacts/011/smoke/`.
+The CPU smoke uses one epoch with two train and two validation batches. Its
+trained checkpoint assigned 10 test trading days to 5 of 8 codes, with counts
+`[0, 0, 4, 1, 1, 0, 2, 2]`; every daily cross-section shared exactly one code.
+This tiny diagnostic shows no immediate single-code collapse but is not a
+substitute for the formal run.
+
+Artifacts, report, and logs are isolated under `artifacts/012/smoke/`.

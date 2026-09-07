@@ -1,4 +1,4 @@
-# AlphaMaster historical-market adapter experiment under the canonical protocol.
+# AlphaMaster discrete historical-market adapter under the canonical protocol.
 # artifact_root is an execution-layer override used by experiments/runner.py.
 artifact_root: null
 
@@ -18,6 +18,13 @@ alphamaster:
     batch_first: true
     bidirectional: false
     dropout: 0
+  market_quantizer:
+    type: standard_vq
+    codebook_size: 8
+    embedding_dim: 63
+    distance: l2
+    straight_through: true
+    commitment_weight: 0.25
   market_adapter:
     type: linear
     input_size: 63
