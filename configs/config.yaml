@@ -1,4 +1,4 @@
-# Pure AlphaMaster baseline under the HVQ canonical dataset and protocol.
+# AlphaMaster historical-market adapter experiment under the canonical protocol.
 # artifact_root is an execution-layer override used by experiments/runner.py.
 artifact_root: null
 
@@ -10,6 +10,20 @@ alphamaster:
   s_nhead: 2
   T_dropout_rate: 0.5
   S_dropout_rate: 0.5
+  market_encoder:
+    type: gru
+    input_size: 63
+    hidden_size: 63
+    num_layers: 1
+    batch_first: true
+    bidirectional: false
+    dropout: 0
+  market_adapter:
+    type: linear
+    input_size: 63
+    output_size: 256
+    bias: false
+    zero_init: true
   beta:
     csi300: 10
     sp500: 5

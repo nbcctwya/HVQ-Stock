@@ -100,7 +100,67 @@ def verify_inputs(data_root):
         model = AlphaMasterModule(config).eval()
         if model.master.feature_gate.t != beta:
             raise AssertionError(f"unexpected {universe} beta")
-        prediction = model(parts.stock_feature, parts.market_feature)
+
+        def capture_forward(candidate_model, stock, market):
+            values = {}
+            handles = [
+                candidate_model.master.feature_gate.register_forward_pre_hook(
+                    lambda module, args: values.__setitem__(
+                        "gate_input", args[0].detach().clone()
+                    )
+                ),
+                candidate_model.master.market_encoder.register_forward_pre_hook(
+                    lambda module, args: values.__setitem__(
+                        "history", args[0].detach().clone()
+                    )
+                ),
+                candidate_model.master.market_encoder.register_forward_hook(
+                    lambda module, args, output: values.__setitem__(
+                        "market_state", output.detach().clone()
+                    )
+                ),
+                candidate_model.master.temporalatten.register_forward_hook(
+                    lambda module, args, output: values.__setitem__(
+                        "hidden", output.detach().clone()
+                    )
+                ),
+                candidate_model.master.market_adapter.register_forward_hook(
+                    lambda module, args, output: values.__setitem__(
+                        "delta_weight", output.detach().clone()
+                    )
+                ),
+            ]
+            values["prediction"] = candidate_model(stock, market).detach()
+            for handle in handles:
+                handle.remove()
+            return values
+
+        zero_values = capture_forward(
+            model, parts.stock_feature, parts.market_feature
+        )
+        prediction = zero_values["prediction"]
+        if zero_values["history"].shape != (len(positions), 19, 63):
+            raise AssertionError("historical market input is not [N,19,63]")
+        if zero_values["market_state"].shape != (len(positions), 63):
+            raise AssertionError("market state is not [N,63]")
+        if zero_values["hidden"].shape != (len(positions), 256):
+            raise AssertionError("TemporalAttention hidden is not [N,256]")
+        if zero_values["delta_weight"].shape != (len(positions), 256):
+            raise AssertionError("Market Adapter output is not [N,256]")
+        torch.testing.assert_close(
+            zero_values["gate_input"], parts.market_feature[:, -1, :],
+            rtol=0, atol=0,
+        )
+        torch.testing.assert_close(
+            zero_values["history"], parts.market_feature[:, :-1, :],
+            rtol=0, atol=0,
+        )
+        if torch.count_nonzero(model.master.market_adapter.weight):
+            raise AssertionError("Market Adapter is not zero-initialized")
+        if torch.count_nonzero(zero_values["delta_weight"]):
+            raise AssertionError("zero-initialized adapter emitted nonzero weights")
+        base_prediction = model.master.decoder(zero_values["hidden"]).squeeze(-1)
+        torch.testing.assert_close(prediction, base_prediction, rtol=0, atol=0)
 
         changed_prior = batch.clone()
         changed_prior[..., GROUP_SLICES["prior"]] += 123456
@@ -111,21 +171,123 @@ def verify_inputs(data_root):
         if not torch.equal(prediction, prediction_changed_prior):
             raise AssertionError("prior13 changed AlphaMaster prediction")
 
-        changed_market = parts.market_feature.clone()
-        changed_market[:, -1, 0] += 100
-        if torch.equal(prediction, model(parts.stock_feature, changed_market)):
-            raise AssertionError("market63 did not affect AlphaMaster prediction")
         if len(set(dates[positions])) != 1:
             raise AssertionError("smoke batch spans multiple trading days")
+        torch.testing.assert_close(
+            zero_values["market_state"],
+            zero_values["market_state"][:1].expand_as(zero_values["market_state"]),
+            rtol=1e-5,
+            atol=2e-7,
+        )
+
+        with torch.no_grad():
+            model.master.market_adapter.weight.normal_(std=0.01)
+        original = capture_forward(model, parts.stock_feature, parts.market_feature)
+        torch.testing.assert_close(
+            original["delta_weight"],
+            original["delta_weight"][:1].expand_as(original["delta_weight"]),
+            rtol=1e-5,
+            atol=2e-7,
+        )
+
+        changed_history = parts.market_feature.clone()
+        changed_history[:, :-1, 0] += 10
+        historical = capture_forward(model, parts.stock_feature, changed_history)
+        torch.testing.assert_close(
+            historical["gate_input"], original["gate_input"], rtol=0, atol=0
+        )
+        if torch.equal(historical["delta_weight"], original["delta_weight"]):
+            raise AssertionError("historical market did not change dynamic weights")
+        if torch.equal(historical["prediction"], original["prediction"]):
+            raise AssertionError("historical market did not affect prediction")
+
+        changed_current = parts.market_feature.clone()
+        changed_current[:, -1, 0] += 100
+        current = capture_forward(model, parts.stock_feature, changed_current)
+        torch.testing.assert_close(
+            current["history"], original["history"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            current["market_state"], original["market_state"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            current["delta_weight"], original["delta_weight"], rtol=0, atol=0
+        )
+        if torch.equal(current["gate_input"], original["gate_input"]):
+            raise AssertionError("current market did not change Feature Gate input")
+        if torch.equal(current["prediction"], original["prediction"]):
+            raise AssertionError("current market did not affect prediction")
+
+        gradient_model = AlphaMasterModule(config).train()
+        optimizer = torch.optim.SGD(gradient_model.parameters(), lr=0.1)
+        target = parts.target(config["predictor"]["target_day"])
+        first_loss = gradient_model.loss_fn(
+            gradient_model(parts.stock_feature, parts.market_feature), target
+        )
+        first_loss.backward()
+        adapter_grad_l1 = (
+            gradient_model.master.market_adapter.weight.grad.abs().sum().item()
+        )
+        if adapter_grad_l1 <= 0:
+            raise AssertionError("Market Adapter did not receive prediction gradient")
+        optimizer.step()
+        adapter_weight_l1 = (
+            gradient_model.master.market_adapter.weight.detach().abs().sum().item()
+        )
+        if adapter_weight_l1 <= 0:
+            raise AssertionError("Market Adapter did not update from zero")
+        optimizer.zero_grad(set_to_none=True)
+        second_loss = gradient_model.loss_fn(
+            gradient_model(parts.stock_feature, parts.market_feature), target
+        )
+        second_loss.backward()
+        gru_gradients = {
+            name: parameter.grad.abs().sum().item()
+            for name, parameter in gradient_model.master.market_encoder.named_parameters()
+            if parameter.grad is not None
+        }
+        if not gru_gradients or sum(gru_gradients.values()) <= 0:
+            raise AssertionError("prediction loss did not reach the GRU")
+
+        gru = model.master.market_encoder.gru
         results[universe] = {
             "input_shape": list(batch.shape),
             "stock_shape": list(parts.stock_feature.shape),
             "market_shape": list(parts.market_feature.shape),
+            "historical_market_shape": list(zero_values["history"].shape),
+            "market_state_shape": list(zero_values["market_state"].shape),
+            "hidden_shape": list(zero_values["hidden"].shape),
+            "delta_weight_shape": list(zero_values["delta_weight"].shape),
             "prediction_shape": list(prediction.shape),
             "beta": beta,
             "prior_invariant": True,
-            "market_sensitive": True,
+            "adapter_zero_initialized": True,
+            "zero_init_007_equivalence_max_abs_diff": float(
+                (prediction - base_prediction).abs().max().item()
+            ),
+            "current_market_gate_uses_last_day_only": True,
+            "historical_branch_uses_previous_19_days_only": True,
+            "historical_market_sensitive_with_nonzero_adapter": True,
+            "current_market_sensitive_through_feature_gate": True,
+            "paths_decoupled": True,
             "single_day_cross_section": True,
+            "cross_section_shared_market_state_and_delta_weight": True,
+            "market_encoder": {
+                "input_size": gru.input_size,
+                "hidden_size": gru.hidden_size,
+                "num_layers": gru.num_layers,
+                "batch_first": gru.batch_first,
+                "bidirectional": gru.bidirectional,
+                "dropout": gru.dropout,
+            },
+            "market_adapter": {
+                "input_size": model.master.market_adapter.in_features,
+                "output_size": model.master.market_adapter.out_features,
+                "bias": model.master.market_adapter.bias is not None,
+                "adapter_first_gradient_l1": adapter_grad_l1,
+                "adapter_after_step_weight_l1": adapter_weight_l1,
+                "gru_second_gradient_l1": sum(gru_gradients.values()),
+            },
         }
     return results
 
@@ -133,7 +295,7 @@ def verify_inputs(data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/007/smoke",
+        "--output-dir", default="artifacts/011/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()

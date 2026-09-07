@@ -13,7 +13,7 @@ from utils.test import Cal_IC_IR
 
 
 class AlphaMasterModule(pl.LightningModule):
-    """Pure AlphaMaster with only canonical stock and market inputs."""
+    """AlphaMaster with current-gate and historical-adapter market paths."""
 
     def __init__(self, config):
         super().__init__()
@@ -21,6 +21,22 @@ class AlphaMasterModule(pl.LightningModule):
         model_cfg = config["alphamaster"]
         universe = config["data"]["universe"]
         beta = model_cfg["beta"][universe]
+        market_encoder_cfg = model_cfg["market_encoder"]
+        market_adapter_cfg = model_cfg["market_adapter"]
+        if market_encoder_cfg["type"] != "gru":
+            raise ValueError("Temporal market encoder must be 'gru'")
+        if not market_encoder_cfg["batch_first"]:
+            raise ValueError("Temporal market encoder must be batch-first")
+        if market_encoder_cfg["bidirectional"]:
+            raise ValueError("Temporal market encoder must be unidirectional")
+        if market_adapter_cfg["type"] != "linear":
+            raise ValueError("Market adapter must be linear")
+        if market_adapter_cfg["input_size"] != market_encoder_cfg["hidden_size"]:
+            raise ValueError("Market adapter input must match market state width")
+        if market_adapter_cfg["bias"]:
+            raise ValueError("Market adapter must not use bias")
+        if not market_adapter_cfg["zero_init"]:
+            raise ValueError("Market adapter must be zero-initialized")
 
         self.stock_dim = model_cfg["d_feat"]
         self.market_dim = model_cfg["d_market"]
@@ -41,6 +57,11 @@ class AlphaMasterModule(pl.LightningModule):
             gate_input_start_index=self.stock_dim,
             gate_input_end_index=self.stock_dim + self.market_dim,
             beta=beta,
+            market_encoder_input_size=market_encoder_cfg["input_size"],
+            market_encoder_hidden_size=market_encoder_cfg["hidden_size"],
+            market_encoder_num_layers=market_encoder_cfg["num_layers"],
+            market_encoder_dropout=market_encoder_cfg["dropout"],
+            market_adapter_output_size=market_adapter_cfg["output_size"],
         )
 
     def forward(self, stock_feature, market_feature):

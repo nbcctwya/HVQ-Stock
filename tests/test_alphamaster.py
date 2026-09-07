@@ -1,4 +1,4 @@
-"""Pure AlphaMaster architecture and canonical adapter tests."""
+"""Historical-market adapter AlphaMaster tests."""
 
 import importlib.util
 import tempfile
@@ -45,12 +45,13 @@ class AlphaMasterTest(unittest.TestCase):
         torch.manual_seed(7)
         self.batch = torch.randn(6, 20, TOTAL_DIM)
 
-    def test_default_config_is_pure_alphamaster(self):
+    def test_default_config_is_historical_market_adapter(self):
         config = load_config()
         self.assertEqual(config["train"]["seed"], 0)
         self.assertEqual(config["train"]["learning_rate"], 8e-6)
         self.assertEqual(config["predictor"]["target_day"], 5)
         self.assertNotIn("vqvae", config)
+        self.assertEqual(config["data"]["window_size"], 20)
         self.assertEqual(config["alphamaster"], {
             "d_feat": 158,
             "d_market": 63,
@@ -59,10 +60,26 @@ class AlphaMasterTest(unittest.TestCase):
             "s_nhead": 2,
             "T_dropout_rate": 0.5,
             "S_dropout_rate": 0.5,
+            "market_encoder": {
+                "type": "gru",
+                "input_size": 63,
+                "hidden_size": 63,
+                "num_layers": 1,
+                "batch_first": True,
+                "bidirectional": False,
+                "dropout": 0,
+            },
+            "market_adapter": {
+                "type": "linear",
+                "input_size": 63,
+                "output_size": 256,
+                "bias": False,
+                "zero_init": True,
+            },
             "beta": {"csi300": 10, "sp500": 5},
         })
 
-    def test_canonical_inputs_prior_invariance_and_market_sensitivity(self):
+    def test_canonical_shapes_path_slices_and_zero_init_equivalence(self):
         model = AlphaMasterModule(load_config()).eval()
         self.assertFalse(any("prior" in name for name, _ in model.named_parameters()))
         stock, market, target = model._get_data(self.batch)
@@ -70,7 +87,51 @@ class AlphaMasterTest(unittest.TestCase):
         self.assertEqual(market.shape, (6, 20, 63))
         self.assertEqual(target.shape, (6,))
 
+        captured = {}
+
+        def save_input(name):
+            return lambda module, args: captured.__setitem__(
+                name, args[0].detach().clone()
+            )
+
+        def save_output(name):
+            return lambda module, args, output: captured.__setitem__(
+                name, output.detach().clone()
+            )
+
+        handles = [
+            model.master.feature_gate.register_forward_pre_hook(save_input("gate")),
+            model.master.market_encoder.register_forward_pre_hook(save_input("history")),
+            model.master.market_encoder.register_forward_hook(save_output("market_state")),
+            model.master.temporalatten.register_forward_hook(save_output("hidden")),
+            model.master.market_adapter.register_forward_hook(save_output("delta_weight")),
+        ]
         prediction = model(stock, market)
+        for handle in handles:
+            handle.remove()
+
+        self.assertEqual(captured["history"].shape, (6, 19, 63))
+        self.assertEqual(captured["market_state"].shape, (6, 63))
+        self.assertEqual(captured["hidden"].shape, (6, 256))
+        self.assertEqual(captured["delta_weight"].shape, (6, 256))
+        self.assertEqual(prediction.shape, (6,))
+        torch.testing.assert_close(captured["gate"], market[:, -1, :], rtol=0, atol=0)
+        torch.testing.assert_close(captured["history"], market[:, :-1, :], rtol=0, atol=0)
+        self.assertEqual(model.master.market_encoder.gru.input_size, 63)
+        self.assertEqual(model.master.market_encoder.gru.hidden_size, 63)
+        self.assertEqual(model.master.market_encoder.gru.num_layers, 1)
+        self.assertTrue(model.master.market_encoder.gru.batch_first)
+        self.assertFalse(model.master.market_encoder.gru.bidirectional)
+        self.assertEqual(model.master.market_encoder.gru.dropout, 0)
+        self.assertEqual(model.master.market_adapter.in_features, 63)
+        self.assertEqual(model.master.market_adapter.out_features, 256)
+        self.assertIsNone(model.master.market_adapter.bias)
+        self.assertEqual(torch.count_nonzero(model.master.market_adapter.weight), 0)
+        self.assertEqual(torch.count_nonzero(captured["delta_weight"]), 0)
+
+        base_prediction = model.master.decoder(captured["hidden"]).squeeze(-1)
+        torch.testing.assert_close(prediction, base_prediction, rtol=0, atol=0)
+
         changed_prior = self.batch.clone()
         changed_prior[..., GROUP_SLICES["prior"]] += 1_000_000
         changed_stock, changed_market, _ = model._get_data(changed_prior)
@@ -78,10 +139,133 @@ class AlphaMasterTest(unittest.TestCase):
             prediction, model(changed_stock, changed_market), rtol=0, atol=0
         )
 
-        changed_market = market.clone()
-        changed_market[:, -1, 0] += 100
-        self.assertFalse(torch.equal(prediction, model(stock, changed_market)))
+    def test_007_prediction_equivalence_with_matching_backbone(self):
+        source = ROOT.parent / "AlphaMaster" / "src" / "alphamaster" / "model.py"
+        if not source.is_file():
+            self.skipTest("standalone AlphaMaster checkout is unavailable")
+        spec = importlib.util.spec_from_file_location("standalone_alphamaster", source)
+        standalone = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(standalone)
+
+        torch.manual_seed(31)
+        reference_007 = standalone.MASTER(beta=10).eval()
+        torch.manual_seed(31)
+        model_011 = MASTER(beta=10).eval()
+        reference_state = reference_007.state_dict()
+        for name, value in reference_state.items():
+            torch.testing.assert_close(
+                model_011.state_dict()[name], value, rtol=0, atol=0
+            )
+        features = torch.randn(5, 20, 221)
+        torch.testing.assert_close(
+            model_011(features), reference_007(features), rtol=0, atol=0
+        )
+
+    def test_market_paths_are_decoupled(self):
+        model = AlphaMasterModule(load_config()).eval()
+        stock, market, _ = model._get_data(self.batch)
+        with torch.no_grad():
+            model.master.market_adapter.weight.copy_(
+                torch.randn_like(model.master.market_adapter.weight) * 0.01
+            )
+
+        def forward_and_capture(candidate_market):
+            values = {}
+            handles = [
+                model.master.feature_gate.register_forward_pre_hook(
+                    lambda module, args: values.__setitem__("gate", args[0].detach().clone())
+                ),
+                model.master.market_encoder.register_forward_pre_hook(
+                    lambda module, args: values.__setitem__("history", args[0].detach().clone())
+                ),
+                model.master.market_adapter.register_forward_hook(
+                    lambda module, args, output: values.__setitem__(
+                        "delta_weight", output.detach().clone()
+                    )
+                ),
+            ]
+            values["prediction"] = model(stock, candidate_market).detach()
+            for handle in handles:
+                handle.remove()
+            return values
+
+        original = forward_and_capture(market)
+        changed_history = market.clone()
+        changed_history[:, :-1, 0] += 10
+        historical = forward_and_capture(changed_history)
+        torch.testing.assert_close(historical["gate"], original["gate"], rtol=0, atol=0)
+        self.assertFalse(torch.equal(historical["delta_weight"], original["delta_weight"]))
+        self.assertFalse(torch.equal(historical["prediction"], original["prediction"]))
+
+        changed_current = market.clone()
+        changed_current[:, -1, 0] += 100
+        current = forward_and_capture(changed_current)
+        torch.testing.assert_close(current["history"], original["history"], rtol=0, atol=0)
+        torch.testing.assert_close(
+            current["delta_weight"], original["delta_weight"], rtol=0, atol=0
+        )
+        self.assertFalse(torch.equal(current["gate"], original["gate"]))
+        self.assertFalse(torch.equal(current["prediction"], original["prediction"]))
+
+    def test_cross_section_shares_market_state_and_dynamic_weight(self):
+        model = AlphaMasterModule(load_config()).eval()
+        stock, market, _ = model._get_data(self.batch)
+        market = market[:1].expand_as(market).clone()
+        with torch.no_grad():
+            model.master.market_adapter.weight.normal_(std=0.01)
+        captured = {}
+        handles = [
+            model.master.market_encoder.register_forward_hook(
+                lambda module, args, output: captured.__setitem__(
+                    "market_state", output.detach().clone()
+                )
+            ),
+            model.master.market_adapter.register_forward_hook(
+                lambda module, args, output: captured.__setitem__(
+                    "delta_weight", output.detach().clone()
+                )
+            ),
+        ]
+        prediction = model(stock, market)
+        for handle in handles:
+            handle.remove()
         self.assertEqual(prediction.shape, (6,))
+        torch.testing.assert_close(
+            captured["market_state"],
+            captured["market_state"][:1].expand_as(captured["market_state"]),
+            rtol=1e-5,
+            atol=2e-7,
+        )
+        torch.testing.assert_close(
+            captured["delta_weight"],
+            captured["delta_weight"][:1].expand_as(captured["delta_weight"]),
+            rtol=1e-5,
+            atol=2e-7,
+        )
+
+    def test_adapter_updates_then_loss_reaches_gru(self):
+        model = AlphaMasterModule(load_config()).train()
+        stock, market, target = model._get_data(self.batch)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+        initial_adapter = model.master.market_adapter.weight.detach().clone()
+        loss = model.loss_fn(model(stock, market), target)
+        loss.backward()
+        adapter_grad = model.master.market_adapter.weight.grad
+        self.assertIsNotNone(adapter_grad)
+        self.assertGreater(adapter_grad.abs().sum().item(), 0)
+        optimizer.step()
+        self.assertFalse(torch.equal(initial_adapter, model.master.market_adapter.weight))
+
+        optimizer.zero_grad(set_to_none=True)
+        loss = model.loss_fn(model(stock, market), target)
+        loss.backward()
+        gru_gradients = [
+            parameter.grad for parameter in model.master.market_encoder.parameters()
+        ]
+        self.assertTrue(gru_gradients)
+        self.assertTrue(all(gradient is not None for gradient in gru_gradients))
+        self.assertGreater(sum(g.abs().sum().item() for g in gru_gradients), 0)
 
     def test_csi300_and_sp500_forward_with_expected_beta(self):
         for universe, beta in (("csi300", 10), ("sp500", 5)):
@@ -111,15 +295,18 @@ class AlphaMasterTest(unittest.TestCase):
                 {"A", "B", "C"},
             )
 
-    def test_checkpoint_load_is_strict(self):
+    def test_checkpoint_load_is_strict_and_prediction_is_preserved(self):
         config = load_config()
-        model = AlphaMasterModule(config)
+        model = AlphaMasterModule(config).eval()
+        stock, market, _ = model._get_data(self.batch)
+        expected_prediction = model(stock, market)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.ckpt"
             torch.save({"state_dict": model.state_dict()}, path)
-            restored = AlphaMasterModule.load_strict_checkpoint(path, config)
-            for expected, actual in zip(model.parameters(), restored.parameters()):
-                torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+            restored = AlphaMasterModule.load_strict_checkpoint(path, config).eval()
+            torch.testing.assert_close(
+                expected_prediction, restored(stock, market), rtol=0, atol=0
+            )
 
             state = model.state_dict()
             state.pop(next(iter(state)))
@@ -127,21 +314,14 @@ class AlphaMasterTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 AlphaMasterModule.load_strict_checkpoint(path, config)
 
-    def test_core_forward_matches_standalone_alphamaster(self):
-        source = ROOT.parent / "AlphaMaster" / "src" / "alphamaster" / "model.py"
-        if not source.is_file():
-            self.skipTest("standalone AlphaMaster checkout is unavailable")
-        spec = importlib.util.spec_from_file_location("standalone_alphamaster", source)
-        standalone = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(standalone)
-
-        reference = standalone.MASTER(beta=10).eval()
-        adapted = MASTER(beta=10).eval()
-        adapted.load_state_dict(reference.state_dict(), strict=True)
-        features = torch.randn(5, 20, 221)
-        torch.testing.assert_close(
-            adapted(features), reference(features), rtol=0, atol=0
-        )
+            base_007_state = {
+                name: value for name, value in model.state_dict().items()
+                if not name.startswith("master.market_encoder.")
+                and not name.startswith("master.market_adapter.")
+            }
+            torch.save({"state_dict": base_007_state}, path)
+            with self.assertRaises(RuntimeError):
+                AlphaMasterModule.load_strict_checkpoint(path, config)
 
 
 if __name__ == "__main__":
