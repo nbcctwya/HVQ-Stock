@@ -92,12 +92,22 @@ Stage 2 strict load PASS，生成标准 40 行 prediction
 
 ## Result
 
-Status: FAILED
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/011/run/stage2.log
+IC: 0.0400
+ICIR: 0.1865
+RankIC: 0.0617
+RankICIR: 0.2781
+
+Annual Return: 10.99%（基准 6.40%，超额 4.59%）
+Sharpe: 0.6440
+Sortino: 0.9805
+MDD: -25.59%
+Calmar: 0.4293
+Turnover: 0.3221
 
 ## Conclusion
 
-Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/011/run/stage2.log
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 0b318c258f446429bab6092950cd6355e0371cf1）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=3-val_loss=0.9960.ckpt`（self-trained）；Stage 2 seed 0。
 
-全部 artifact 与日志保留在 `artifacts/011/run/`。
+产物：`artifacts/011/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
