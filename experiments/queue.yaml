@@ -100,3 +100,15 @@ experiments:
     commit: db5128fedd751b4de03b981760f39138717ec37c
     status: done
     stage1_source: self
+  - id: "010"
+    name: prism-shared-routed-moe
+    base: main
+    branch: exp/010-prism-shared-routed-moe
+    commit: 9b854f0436f8a7c3283fd375661dd6152cc965f1
+    status: pending
+    stage1_source: external
+    # Corrected PRISM-VQ baseline exact Stage 1 (single VQ512, seed 42).
+    # This local artifact is byte-identical to the original PRISM-VQ file;
+    # artifacts/ is gitignored, so a plain clone must restore it explicitly.
+    # Missing/empty files fail loudly and never trigger Stage 1 self-training.
+    stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
