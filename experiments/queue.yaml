@@ -126,3 +126,10 @@ experiments:
     commit: 01e8eecd5e36de50a7dbf4604bdb1ad3d2d894c5
     status: pending
     stage1_source: self
+  - id: "013"
+    name: alphamaster-ema-market-adapter
+    base: exp/012-alphamaster-discrete-market-adapter
+    branch: exp/013-alphamaster-ema-market-adapter
+    commit: 2a019b02b1dd624fdc44ce218568f7a8ad6df89d
+    status: pending
+    stage1_source: self
