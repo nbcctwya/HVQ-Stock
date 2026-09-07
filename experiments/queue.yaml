@@ -112,3 +112,10 @@ experiments:
     # artifacts/ is gitignored, so a plain clone must restore it explicitly.
     # Missing/empty files fail loudly and never trigger Stage 1 self-training.
     stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
+  - id: "011"
+    name: alphamaster-continuous-market-adapter
+    base: exp/007-alphamaster-baseline
+    branch: exp/011-alphamaster-continuous-market-adapter
+    commit: 0b318c258f446429bab6092950cd6355e0371cf1
+    status: pending
+    stage1_source: self
