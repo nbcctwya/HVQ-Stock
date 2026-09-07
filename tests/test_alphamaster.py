@@ -1,11 +1,14 @@
-"""Discrete historical-market adapter AlphaMaster tests."""
+"""Continuous-warm-up discrete-market AlphaMaster tests."""
 
 import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import torch
 import yaml
 
@@ -13,6 +16,10 @@ from dataset.dataset import init_data_loader
 from dataset.schema import GROUP_SLICES, TOTAL_DIM
 from module.alphamaster import MASTER, StandardVectorQuantizer
 from trainer.train_alphamaster import AlphaMasterModule
+from utils.warmup_callbacks import (
+    WarmupAwareEarlyStopping,
+    WarmupAwareModelCheckpoint,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,10 +52,14 @@ class AlphaMasterTest(unittest.TestCase):
         torch.manual_seed(7)
         self.batch = torch.randn(6, 20, TOTAL_DIM)
 
-    def test_default_config_is_discrete_historical_market_adapter(self):
+    def test_default_config_is_vq_warmup_historical_market_adapter(self):
         config = load_config()
         self.assertEqual(config["train"]["seed"], 0)
         self.assertEqual(config["train"]["learning_rate"], 8e-6)
+        self.assertEqual(config["train"]["num_epochs"], 70)
+        self.assertEqual(config["train"]["warmup_epochs"], 10)
+        self.assertEqual(config["train"]["early_stopping"]["monitor"], "val_loss")
+        self.assertEqual(config["train"]["early_stopping"]["patience"], 15)
         self.assertEqual(config["predictor"]["target_day"], 5)
         self.assertNotIn("vqvae", config)
         self.assertEqual(config["data"]["window_size"], 20)
@@ -221,6 +232,107 @@ class AlphaMasterTest(unittest.TestCase):
         self.assertGreater(inputs.grad.abs().sum().item(), 0)
         self.assertIsNotNone(quantizer.embedding.weight.grad)
         self.assertGreater(quantizer.embedding.weight.grad.abs().sum().item(), 0)
+
+    def test_warmup_bypasses_vq_and_uses_prediction_loss_only(self):
+        model = AlphaMasterModule(load_config()).eval()
+        stock, market, target = model._get_data(self.batch)
+        with torch.no_grad():
+            model.master.market_adapter.weight.normal_(std=0.01)
+
+        captured = {"quantizer_calls": 0}
+        handles = [
+            model.master.market_encoder.register_forward_hook(
+                lambda module, args, output: captured.__setitem__(
+                    "market_state", output.detach().clone()
+                )
+            ),
+            model.master.market_quantizer.register_forward_hook(
+                lambda module, args, output: captured.__setitem__(
+                    "quantizer_calls", captured["quantizer_calls"] + 1
+                )
+            ),
+            model.master.market_adapter.register_forward_pre_hook(
+                lambda module, args: captured.__setitem__(
+                    "adapter_input", args[0].detach().clone()
+                )
+            ),
+        ]
+        loss, prediction_loss, vq_loss, vq_output, _ = model._objective(
+            stock, market, target, epoch=9
+        )
+        for handle in handles:
+            handle.remove()
+
+        self.assertFalse(model.use_vq_at_epoch(9))
+        self.assertTrue(model.use_vq_at_epoch(10))
+        self.assertEqual(captured["quantizer_calls"], 0)
+        torch.testing.assert_close(
+            captured["adapter_input"], captured["market_state"], rtol=0, atol=0
+        )
+        self.assertIsNone(vq_output)
+        self.assertEqual(vq_loss.item(), 0)
+        torch.testing.assert_close(loss, prediction_loss, rtol=0, atol=0)
+
+    def test_warmup_updates_gru_adapter_but_not_codebook(self):
+        model = AlphaMasterModule(load_config()).train()
+        stock, market, target = model._get_data(self.batch)
+        with torch.no_grad():
+            # A nonzero adapter exposes the continuous prediction gradient to
+            # the GRU; zero-init itself is covered independently above.
+            model.master.market_adapter.weight.normal_(std=0.01)
+        initial = {
+            "adapter": model.master.market_adapter.weight.detach().clone(),
+            "gru": model.master.market_encoder.gru.weight_ih_l0.detach().clone(),
+            "codebook": model.master.market_quantizer.embedding.weight.detach().clone(),
+        }
+        loss, _, _, _, _ = model._objective(stock, market, target, epoch=0)
+        loss.backward()
+        self.assertIsNotNone(model.master.market_adapter.weight.grad)
+        self.assertGreater(model.master.market_adapter.weight.grad.abs().sum().item(), 0)
+        self.assertIsNotNone(model.master.market_encoder.gru.weight_ih_l0.grad)
+        self.assertGreater(
+            model.master.market_encoder.gru.weight_ih_l0.grad.abs().sum().item(), 0
+        )
+        self.assertIsNone(model.master.market_quantizer.embedding.weight.grad)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        optimizer.step()
+        self.assertFalse(torch.equal(initial["adapter"], model.master.market_adapter.weight))
+        self.assertFalse(
+            torch.equal(initial["gru"], model.master.market_encoder.gru.weight_ih_l0)
+        )
+        self.assertTrue(
+            torch.equal(initial["codebook"], model.master.market_quantizer.embedding.weight)
+        )
+
+    def test_epoch_10_restores_exact_standard_vq_objective_and_diagnostics(self):
+        model = AlphaMasterModule(load_config()).eval()
+        stock, market, target = model._get_data(self.batch)
+        with torch.no_grad():
+            model.master.market_adapter.weight.normal_(std=0.01)
+        loss, prediction_loss, vq_loss, vq_output, switch = model._objective(
+            stock, market, target, epoch=10, collect_switch=True
+        )
+        torch.testing.assert_close(loss, prediction_loss + vq_output.loss)
+        torch.testing.assert_close(vq_loss, vq_output.loss)
+        torch.testing.assert_close(
+            switch.quantized_prediction,
+            model(stock, market, use_vq=True),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            switch.continuous_prediction,
+            model(stock, market, use_vq=False),
+            rtol=0,
+            atol=0,
+        )
+        self.assertGreater(
+            (switch.quantized_prediction - switch.continuous_prediction)
+            .abs()
+            .max()
+            .item(),
+            0,
+        )
 
     def test_market_paths_are_decoupled(self):
         model = AlphaMasterModule(load_config()).eval()
@@ -433,6 +545,41 @@ class AlphaMasterTest(unittest.TestCase):
             torch.save({"state_dict": base_011_state}, path)
             with self.assertRaises(RuntimeError):
                 AlphaMasterModule.load_strict_checkpoint(path, config)
+
+
+class WarmupCallbackTest(unittest.TestCase):
+    def test_checkpoint_and_early_stopping_begin_at_epoch_10(self):
+        trainer = SimpleNamespace(current_epoch=9)
+        module = object()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = WarmupAwareModelCheckpoint(
+                start_epoch=10,
+                dirpath=tmp,
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+            )
+            early_stop = WarmupAwareEarlyStopping(
+                start_epoch=10,
+                monitor="val_loss",
+                mode="min",
+                patience=15,
+            )
+            with patch.object(ModelCheckpoint, "on_validation_end") as parent_ckpt:
+                checkpoint.on_validation_end(trainer, module)
+                parent_ckpt.assert_not_called()
+                trainer.current_epoch = 10
+                checkpoint.on_validation_end(trainer, module)
+                parent_ckpt.assert_called_once_with(trainer, module)
+            trainer.current_epoch = 9
+            with patch.object(EarlyStopping, "on_validation_end") as parent_stop:
+                early_stop.on_validation_end(trainer, module)
+                parent_stop.assert_not_called()
+                trainer.current_epoch = 10
+                early_stop.on_validation_end(trainer, module)
+                parent_stop.assert_called_once_with(trainer, module)
+            self.assertEqual(checkpoint.best_model_score, None)
+            self.assertEqual(early_stop.wait_count, 0)
 
 
 if __name__ == "__main__":

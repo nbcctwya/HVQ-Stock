@@ -56,6 +56,9 @@ train:
   seed: 0
   learning_rate: 0.000008
   num_epochs: 70
+  # Epochs 0-9 train the continuous GRU -> adapter path. Standard VQ and its
+  # formal validation/checkpoint objective start at epoch 10.
+  warmup_epochs: 10
   project_name: AlphaMaster
   run_name: auto
   accelerator: gpu

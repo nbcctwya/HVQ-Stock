@@ -6,14 +6,17 @@ from pathlib import Path
 import hydra
 import pytorch_lightning as pl
 import torch
-from hydra.utils import instantiate, to_absolute_path
+from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning.callbacks import ModelCheckpoint
 
 from dataset.dataset import init_data_loader
 from dataset.schema import dataset_basename
 from trainer.train_alphamaster import AlphaMasterModule
 from utils import apply_artifact_root, get_root_dir, seed_everything
+from utils.warmup_callbacks import (
+    WarmupAwareEarlyStopping,
+    WarmupAwareModelCheckpoint,
+)
 
 
 torch.set_float32_matmul_precision("high")
@@ -31,8 +34,12 @@ def _build_callbacks(cfg: DictConfig, run_name: str):
     checkpoint_dir = Path(get_root_dir()) / cfg.train.save_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     early_cfg = cfg.train.early_stopping
+    warmup_epochs = int(cfg.train.warmup_epochs)
+    if warmup_epochs < 0 or warmup_epochs >= int(cfg.train.num_epochs):
+        raise ValueError("train.warmup_epochs must be in [0, train.num_epochs)")
 
-    checkpoint = ModelCheckpoint(
+    checkpoint = WarmupAwareModelCheckpoint(
+        start_epoch=warmup_epochs,
         save_top_k=1,
         save_last=False,
         monitor=early_cfg.monitor,
@@ -40,14 +47,14 @@ def _build_callbacks(cfg: DictConfig, run_name: str):
         dirpath=str(checkpoint_dir),
         filename=f"{run_name}" + "-{epoch}-{val_loss:.4f}",
     )
-    early_stop = instantiate({
-        "_target_": "pytorch_lightning.callbacks.EarlyStopping",
-        "monitor": early_cfg.monitor,
-        "min_delta": early_cfg.min_delta,
-        "patience": early_cfg.patience,
-        "verbose": early_cfg.verbose,
-        "mode": early_cfg.mode,
-    })
+    early_stop = WarmupAwareEarlyStopping(
+        start_epoch=warmup_epochs,
+        monitor=early_cfg.monitor,
+        min_delta=early_cfg.min_delta,
+        patience=early_cfg.patience,
+        verbose=early_cfg.verbose,
+        mode=early_cfg.mode,
+    )
     return [checkpoint, early_stop], checkpoint
 
 

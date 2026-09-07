@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end discrete-market AlphaMaster smoke using tiny canonical PKLs."""
+"""End-to-end VQ-warm-up AlphaMaster smoke using tiny canonical PKLs."""
 
 import argparse
 import json
@@ -82,6 +82,14 @@ def run_logged(command, log_path, env):
         )
 
 
+def read_switch_diagnostics(log_path):
+    marker = "VQ switch diagnostics: "
+    for line in log_path.read_text().splitlines():
+        if marker in line:
+            return json.loads(line.split(marker, 1)[1])
+    raise AssertionError(f"switch diagnostics not found in {log_path}")
+
+
 def verify_inputs(data_root):
     with (ROOT / "configs" / "config.yaml").open() as stream:
         base_config = yaml.safe_load(stream)
@@ -101,8 +109,8 @@ def verify_inputs(data_root):
         if model.master.feature_gate.t != beta:
             raise AssertionError(f"unexpected {universe} beta")
 
-        def capture_forward(candidate_model, stock, market):
-            values = {}
+        def capture_forward(candidate_model, stock, market, use_vq=True):
+            values = {"quantizer_called": False}
             handles = [
                 candidate_model.master.feature_gate.register_forward_pre_hook(
                     lambda module, args: values.__setitem__(
@@ -121,6 +129,7 @@ def verify_inputs(data_root):
                 ),
                 candidate_model.master.market_quantizer.register_forward_hook(
                     lambda module, args, output: values.update({
+                        "quantizer_called": True,
                         "vq_input": args[0].detach().clone(),
                         "quantized_state": output.quantized.detach().clone(),
                         "code_indices": output.indices.detach().clone(),
@@ -145,7 +154,9 @@ def verify_inputs(data_root):
                     )
                 ),
             ]
-            values["prediction"] = candidate_model(stock, market).detach()
+            values["prediction"] = candidate_model(
+                stock, market, use_vq=use_vq
+            ).detach()
             for handle in handles:
                 handle.remove()
             return values
@@ -191,6 +202,19 @@ def verify_inputs(data_root):
             raise AssertionError("zero-initialized adapter emitted nonzero weights")
         base_prediction = model.master.decoder(zero_values["hidden"]).squeeze(-1)
         torch.testing.assert_close(prediction, base_prediction, rtol=0, atol=0)
+
+        warmup_values = capture_forward(
+            model, parts.stock_feature, parts.market_feature, use_vq=False
+        )
+        if warmup_values["quantizer_called"]:
+            raise AssertionError("warm-up called the bypassed VQ module")
+        torch.testing.assert_close(
+            warmup_values["adapter_input"], warmup_values["market_state"],
+            rtol=0, atol=0,
+        )
+        torch.testing.assert_close(
+            warmup_values["prediction"], base_prediction, rtol=0, atol=0
+        )
 
         changed_prior = batch.clone()
         changed_prior[..., GROUP_SLICES["prior"]] += 123456
@@ -323,6 +347,44 @@ def verify_inputs(data_root):
             if torch.equal(initial_parameters[name], parameter):
                 raise AssertionError(f"{name} did not update")
 
+        warmup_model = AlphaMasterModule(config).train()
+        with torch.no_grad():
+            warmup_model.master.market_adapter.weight.normal_(std=0.01)
+        warmup_optimizer = torch.optim.SGD(warmup_model.parameters(), lr=0.1)
+        warmup_initial = {
+            "adapter": warmup_model.master.market_adapter.weight.detach().clone(),
+            "codebook": warmup_model.master.market_quantizer.embedding.weight.detach().clone(),
+            "gru": warmup_model.master.market_encoder.gru.weight_ih_l0.detach().clone(),
+        }
+        warmup_loss, _, warmup_vq_loss, warmup_vq, _ = warmup_model._objective(
+            parts.stock_feature, parts.market_feature, target, epoch=0
+        )
+        warmup_loss.backward()
+        if warmup_vq is not None or warmup_vq_loss.item() != 0:
+            raise AssertionError("warm-up objective unexpectedly contains VQ loss")
+        if warmup_model.master.market_quantizer.embedding.weight.grad is not None:
+            raise AssertionError("warm-up updated the bypassed codebook")
+        warmup_gradients = {
+            "adapter": warmup_model.master.market_adapter.weight.grad,
+            "gru": warmup_model.master.market_encoder.gru.weight_ih_l0.grad,
+        }
+        for name, gradient in warmup_gradients.items():
+            if gradient is None or gradient.abs().sum().item() <= 0:
+                raise AssertionError(f"warm-up {name} gradient is missing")
+        warmup_optimizer.step()
+        if torch.equal(
+            warmup_initial["adapter"], warmup_model.master.market_adapter.weight
+        ) or torch.equal(
+            warmup_initial["gru"],
+            warmup_model.master.market_encoder.gru.weight_ih_l0,
+        ):
+            raise AssertionError("warm-up GRU/adapter did not update")
+        if not torch.equal(
+            warmup_initial["codebook"],
+            warmup_model.master.market_quantizer.embedding.weight,
+        ):
+            raise AssertionError("warm-up codebook changed")
+
         gru = model.master.market_encoder.gru
         quantizer = model.master.market_quantizer
         results[universe] = {
@@ -348,6 +410,9 @@ def verify_inputs(data_root):
             "historical_market_sensitive_with_nonzero_adapter": True,
             "current_market_sensitive_through_feature_gate": True,
             "paths_decoupled": True,
+            "warmup_bypasses_vq": True,
+            "warmup_adapter_input_is_continuous_market_state": True,
+            "warmup_prediction_only_loss": True,
             "single_day_cross_section": True,
             "cross_section_shared_market_state_quantized_regime_and_delta_weight": True,
             "market_encoder": {
@@ -379,6 +444,7 @@ def verify_inputs(data_root):
                 "adapter_first_gradient_l1": gradient_l1["adapter"],
                 "gru_first_gradient_l1": gradient_l1["gru"],
                 "vq_gru_adapter_updated": True,
+                "warmup_gru_adapter_updated_codebook_unchanged": True,
             },
         }
     return results
@@ -424,7 +490,7 @@ def measure_codebook_usage(checkpoint, config, data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/012/smoke",
+        "--output-dir", default="artifacts/015/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()
@@ -448,7 +514,7 @@ def main():
     if best is None:
         run_logged([
             sys.executable, "stage1.py", *common,
-            "train.num_epochs=1",
+            "train.num_epochs=11",
             "train.accelerator=cpu",
             "train.gpu_counts=1",
             "train.limit_train_batches=2",
@@ -459,6 +525,26 @@ def main():
     if best is None:
         raise AssertionError("runner did not discover the Stage 1 checkpoint")
     checkpoint = best[1]
+    if "epoch=10-" not in checkpoint.name:
+        raise AssertionError(
+            "formal best checkpoint was not selected from the epoch-10 VQ phase"
+        )
+    switch_diagnostics = read_switch_diagnostics(output_dir / "stage1.log")
+    if switch_diagnostics["epoch"] != 10:
+        raise AssertionError("switch diagnostics were not recorded at epoch 10")
+    if switch_diagnostics["day_assignments"] != 2:
+        raise AssertionError("switch diagnostics did not cover two validation days")
+    if switch_diagnostics["active_codes"] < 1:
+        raise AssertionError("switch diagnostics reported no active VQ code")
+    for key in (
+        "quantization_distortion",
+        "perplexity",
+        "continuous_quantized_prediction_mae",
+        "continuous_quantized_prediction_rmse",
+        "continuous_quantized_prediction_max_abs",
+    ):
+        if not np.isfinite(switch_diagnostics[key]):
+            raise AssertionError(f"non-finite switch diagnostic: {key}")
     run_logged([
         sys.executable, "stage2.py", *common,
         "train.seed=0",
@@ -486,6 +572,10 @@ def main():
             "checkpoint": str(checkpoint.relative_to(ROOT)),
             "runner_discovery": True,
             "minimal_training": True,
+            "warmup_epochs_executed": 10,
+            "formal_vq_phase_first_epoch": 10,
+            "formal_checkpoint_selection_first_epoch": 10,
+            "switch_diagnostics": switch_diagnostics,
             "codebook_usage": codebook_usage,
         },
         "stage2": {

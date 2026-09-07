@@ -1,9 +1,10 @@
-"""AlphaMaster with a discrete historical-market decoder adapter.
+"""AlphaMaster with a warm-started discrete historical-market adapter.
 
 The original current-market feature gate and complete stock backbone are kept
 intact. A lightweight GRU encodes the previous 19 market observations, a
 standard vector quantizer maps the continuous state to a reusable regime, and
-a zero-initialized linear hypernetwork adds a decoder-weight residual.
+a zero-initialized linear hypernetwork adds a decoder-weight residual. The VQ
+module can be bypassed without changing the initialized model structure.
 """
 
 import math
@@ -191,6 +192,14 @@ class VectorQuantizerOutput(NamedTuple):
     indices: torch.Tensor
 
 
+class MarketSwitchOutput(NamedTuple):
+    """Counterfactual continuous/VQ paths used at the switch validation."""
+
+    market_state: torch.Tensor
+    continuous_prediction: torch.Tensor
+    quantized_prediction: torch.Tensor
+
+
 class StandardVectorQuantizer(nn.Module):
     """L2 nearest-neighbor VQ with a standard straight-through estimator."""
 
@@ -322,7 +331,15 @@ class MASTER(nn.Module):
             commitment_weight=market_vq_commitment_weight,
         )
 
-    def forward(self, x, return_vq_output=False):
+    def forward(
+        self,
+        x,
+        use_vq=True,
+        return_vq_output=False,
+        return_switch_output=False,
+    ):
+        if return_switch_output and not use_vq:
+            raise ValueError("Switch diagnostics require the VQ path")
         src = x[:, :, :self.gate_input_start_index]
         gate_input = x[
             :, -1, self.gate_input_start_index:self.gate_input_end_index
@@ -338,11 +355,25 @@ class MASTER(nn.Module):
         x = self.satten(x)
         h = self.temporalatten(x)
         market_state = self.market_encoder(market_history)
-        vq_output = self.market_quantizer(market_state)
-        delta_weight = self.market_adapter(vq_output.quantized)
+        vq_output = None
+        if use_vq or return_vq_output:
+            vq_output = self.market_quantizer(market_state)
+        adapter_input = vq_output.quantized if use_vq else market_state
+        delta_weight = self.market_adapter(adapter_input)
         y_base = self.decoder(h).squeeze(-1)
         y_market = torch.sum(delta_weight * h, dim=-1)
         prediction = y_base + y_market
+        if return_switch_output:
+            continuous_delta_weight = self.market_adapter(market_state)
+            continuous_prediction = y_base + torch.sum(
+                continuous_delta_weight * h, dim=-1
+            )
+            switch_output = MarketSwitchOutput(
+                market_state=market_state,
+                continuous_prediction=continuous_prediction,
+                quantized_prediction=prediction,
+            )
+            return prediction, vq_output, switch_output
         if return_vq_output:
             return prediction, vq_output
         return prediction
