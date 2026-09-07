@@ -85,18 +85,22 @@ checkpoint 不可复用，`stage1_source: self` 与完整重训要求一致。�
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0473
+ICIR: 0.2573
+RankIC: 0.0598
+RankICIR: 0.3232
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 16.12%（基准 6.40%，超额 9.72%）
+Sharpe: 0.7446
+Sortino: 1.2597
+MDD: -30.98%
+Calmar: 0.5205
+Turnover: 0.3251
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 2a019b02b1dd624fdc44ce218568f7a8ad6df89d）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=30-val_loss=1.0419.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/013/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
