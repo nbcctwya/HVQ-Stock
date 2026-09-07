@@ -117,7 +117,7 @@ experiments:
     base: exp/007-alphamaster-baseline
     branch: exp/011-alphamaster-continuous-market-adapter
     commit: 0b318c258f446429bab6092950cd6355e0371cf1
-    status: failed
+    status: running
     stage1_source: self
   - id: "012"
     name: alphamaster-discrete-market-adapter
