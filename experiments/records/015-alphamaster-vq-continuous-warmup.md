@@ -95,18 +95,22 @@ regime。完整报告与日志位于
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0400
+ICIR: 0.2319
+RankIC: 0.0486
+RankICIR: 0.2715
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 10.56%（基准 6.40%，超额 4.16%）
+Sharpe: 0.5223
+Sortino: 0.8435
+MDD: -29.68%
+Calmar: 0.3557
+Turnover: 0.3247
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit bf4736892a94287de656b655016400bd67885618）。Stage 1 best checkpoint：`alphamaster_csi300_s42-epoch=42-val_loss=1.0983.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/015/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。

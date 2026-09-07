@@ -145,5 +145,5 @@ experiments:
     base: exp/012-alphamaster-discrete-market-adapter
     branch: exp/015-alphamaster-vq-continuous-warmup
     commit: bf4736892a94287de656b655016400bd67885618
-    status: running
+    status: done
     stage1_source: self
