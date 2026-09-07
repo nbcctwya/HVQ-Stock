@@ -297,6 +297,11 @@ def verify_inputs(data_root):
             parts.market_feature,
             return_vq_output=True,
         )
+        codebook_after_ema = (
+            gradient_model.master.market_quantizer.embedding.weight.detach().clone()
+        )
+        if torch.equal(initial_parameters["codebook"], codebook_after_ema):
+            raise AssertionError("codebook did not update through EMA")
         first_loss = (
             gradient_model.loss_fn(gradient_prediction, target) + gradient_vq.loss
         )
@@ -305,7 +310,6 @@ def verify_inputs(data_root):
         first_loss.backward()
         gradients = {
             "adapter": gradient_model.master.market_adapter.weight.grad,
-            "codebook": gradient_model.master.market_quantizer.embedding.weight.grad,
             "gru": gradient_model.master.market_encoder.gru.weight_ih_l0.grad,
         }
         gradient_l1 = {}
@@ -314,9 +318,14 @@ def verify_inputs(data_root):
                 raise AssertionError(f"{name} did not receive a valid gradient")
             gradient_l1[name] = gradient.abs().sum().item()
         optimizer.step()
+        torch.testing.assert_close(
+            gradient_model.master.market_quantizer.embedding.weight,
+            codebook_after_ema,
+            rtol=0,
+            atol=0,
+        )
         updated_parameters = {
             "adapter": gradient_model.master.market_adapter.weight,
-            "codebook": gradient_model.master.market_quantizer.embedding.weight,
             "gru": gradient_model.master.market_encoder.gru.weight_ih_l0,
         }
         for name, parameter in updated_parameters.items():
@@ -364,13 +373,16 @@ def verify_inputs(data_root):
                 "distance": "l2",
                 "straight_through": True,
                 "commitment_weight": quantizer.commitment_weight,
+                "update": "ema",
+                "decay": quantizer.decay,
                 "initial_vq_loss": float(zero_values["vq_loss"].item()),
                 "initial_codebook_loss": float(zero_values["codebook_loss"].item()),
                 "initial_commitment_loss": float(
                     zero_values["commitment_loss"].item()
                 ),
                 "controlled_history_regime_changed": True,
-                "first_gradient_l1": gradient_l1["codebook"],
+                "embedding_requires_grad": quantizer.embedding.weight.requires_grad,
+                "codebook_updated_by_ema": True,
             },
             "market_adapter": {
                 "input_size": model.master.market_adapter.in_features,
@@ -378,7 +390,7 @@ def verify_inputs(data_root):
                 "bias": model.master.market_adapter.bias is not None,
                 "adapter_first_gradient_l1": gradient_l1["adapter"],
                 "gru_first_gradient_l1": gradient_l1["gru"],
-                "vq_gru_adapter_updated": True,
+                "ema_vq_gru_adapter_updated": True,
             },
         }
     return results
@@ -424,7 +436,7 @@ def measure_codebook_usage(checkpoint, config, data_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output-dir", default="artifacts/012/smoke",
+        "--output-dir", default="artifacts/013/smoke",
         help="Smoke artifact directory relative to the repository root.",
     )
     args = parser.parse_args()

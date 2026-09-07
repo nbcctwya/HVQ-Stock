@@ -32,8 +32,8 @@ class AlphaMasterModule(pl.LightningModule):
             raise ValueError("Temporal market encoder must be unidirectional")
         if market_adapter_cfg["type"] != "linear":
             raise ValueError("Market adapter must be linear")
-        if market_quantizer_cfg["type"] != "standard_vq":
-            raise ValueError("Market quantizer must be standard VQ")
+        if market_quantizer_cfg["type"] != "ema_vq":
+            raise ValueError("Market quantizer must use EMA VQ")
         if market_quantizer_cfg["distance"] != "l2":
             raise ValueError("Market quantizer must use L2 nearest neighbors")
         if not market_quantizer_cfg["straight_through"]:
@@ -73,6 +73,7 @@ class AlphaMasterModule(pl.LightningModule):
             market_vq_codebook_size=market_quantizer_cfg["codebook_size"],
             market_vq_embedding_dim=market_quantizer_cfg["embedding_dim"],
             market_vq_commitment_weight=market_quantizer_cfg["commitment_weight"],
+            market_vq_decay=market_quantizer_cfg["decay"],
             market_adapter_output_size=market_adapter_cfg["output_size"],
         )
 

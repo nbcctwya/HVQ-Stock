@@ -1,75 +1,80 @@
-# 012 — AlphaMaster Discrete Market Adapter
+# 013 — AlphaMaster EMA Market Adapter
 
 ## Base
 
-`exp/011-alphamaster-continuous-market-adapter`
+`exp/012-alphamaster-discrete-market-adapter`
 
 ## Idea / Motivation
 
-Experiment 011 conditions the prediction-side Market Adapter directly on a
-continuous 63-dimensional state produced from the previous 19 market days.
-This experiment asks whether compressing that state into one of a small number
-of reusable regimes filters market noise and improves prediction-side
-adaptation.
+Experiment 012 quantizes the historical GRU market state with a standard VQ
+whose codebook is learned by ordinary gradients. This experiment changes only
+that update mechanism to exponential moving averages with decay `0.99`.
 
-The current-day and historical market signals retain separate roles. The
-current day controls the original input-side Feature Gate; only the historical
-GRU state is quantized before it reaches the existing Market Adapter.
+The question is whether EMA produces more stable historical market-regime
+prototypes and thereby improves prediction-side market adaptation. The model
+path remains:
+
+```text
+market history
+    -> GRU
+    -> continuous market state
+    -> EMA VQ
+    -> quantized market state
+    -> Market Adapter
+    -> prediction residual
+```
 
 ## Core modification
 
-The complete 011 path remains, with one standard VQ inserted between its GRU
-and adapter:
+The `8 x 63` codebook is no longer an optimizer-updated parameter. During
+training, L2 nearest-neighbor assignments accumulate per-code cluster counts
+and embedding sums, and the corresponding buffers and prototypes are updated
+with EMA decay `0.99`. One initial pseudo-observation per code preserves unused
+prototypes and keeps the first normalization stable. Evaluation and validation
+forwards do not update the EMA state.
 
-```text
-market[:, :-1, :] [N,19,63]
--> unchanged single-layer GRU -> m_t [N,63]
--> standard VQ (8 codes, embedding_dim=63) -> z_q [N,63]
--> unchanged Linear(63,256,bias=False), zero-initialized -> delta_w_t [N,256]
--> dot(delta_w_t, h) -> y_market
-```
-
-Quantization uses squared L2 nearest-neighbor assignment, a standard
-straight-through estimator, and the loss
-`codebook_mse + 0.25 * commitment_mse`. The selected embedding is the exact
-forward value, while the straight-through path sends prediction gradients to
-the GRU. VQ loss is added to the unchanged prediction MSE during Stage 1.
-
-The canonical daily sampler emits one complete trading-day cross-section per
-batch. Because all stocks on that day share the same historical market window,
-they select the same code and receive the exact same quantized regime vector.
+The selected code remains the exact forward value and the straight-through
+estimator remains the identity path to the GRU. The reported VQ loss remains
+`codebook_mse + 0.25 * commitment_mse`, preserving 012's training, validation,
+and checkpoint-selection scale. The codebook term is detached, so only the
+commitment term contributes gradients and codebook learning occurs only through
+EMA.
 
 ## Difference from base
 
-- Added only a trainable `8 x 63` standard VQ codebook between the existing GRU
-  output and existing Market Adapter input, plus its standard VQ loss.
-- The 011 GRU is unchanged: `input_size=63`, `hidden_size=63`, `num_layers=1`,
-  `batch_first=True`, unidirectional, and dropout 0.
-- The Market Adapter remains `Linear(63,256,bias=False)` with explicit zero
-  initialization, and the decoder residual equation remains unchanged.
-- The original Feature Gate still and only receives `market[:, -1, :]`; the
-  GRU/VQ branch still and only receives `market[:, :-1, :]`.
-- The MASTER backbone, original decoder, canonical `158 + 13 + 63 + 10 = 244`
-  schema, `T=20`, unused prior13 behavior, splits, model dimensions, dropout,
-  beta, target day, optimizer, seeds, training budget, early stopping, metrics,
-  and Top30/Drop5 backtest protocol are unchanged from 011.
-- Stage 1 provenance is `self`, because VQ is newly trainable and changes the
-  formal forward graph, so the complete model must be retrained.
+- The sole experimental variable is the 012 codebook update: ordinary gradient
+  updates are replaced by EMA count/sum updates with decay `0.99`.
+- Code assignment remains squared L2 nearest-neighbor; codebook size remains 8,
+  embedding dimension remains 63, the straight-through estimator is unchanged,
+  and commitment weight remains 0.25.
+- The historical market slice, single-layer GRU, quantized adapter input,
+  zero-initialized `Linear(63,256,bias=False)` Market Adapter, and decoder
+  residual equation are unchanged from 012.
+- The current-day Feature Gate, complete MASTER backbone, decoder, canonical
+  schema, unused prior13 behavior, model dimensions, dropout, beta, target day,
+  Adam learning rate, splits, training budget, early stopping, seeds, metrics,
+  and Top30/Drop5 backtest protocol are unchanged.
+- Stage 1 provenance is `self`: EMA buffers and the formal codebook-training
+  mechanism differ from 012, so the complete model must be retrained. A real
+  012 smoke checkpoint fails strict loading because it lacks the EMA state;
+  the 013 smoke checkpoint strict-loads successfully.
 
 ## Smoke status
 
-PASS. The full unit suite passes 92/92 tests. Tests and the isolated smoke cover
-canonical GRU/VQ/Adapter shapes, the exact configured VQ dimensions and loss,
-straight-through gradients, zero initialization, exact initial prediction
-equivalence, same-day quantized-regime sharing, current/history path isolation,
-VQ/GRU/Adapter gradients and parameter updates, strict checkpoint save/load,
-Stage 1 to Stage 2 inference, and compatibility with the existing prediction
-and backtest interfaces.
+PASS. The complete unit suite passes 93/93 tests. Coverage includes the exact
+EMA update at decay `0.99`, frozen codebook gradients, optimizer/EMA separation,
+no EMA mutation in evaluation mode, L2 assignment, STE and commitment gradient
+semantics, canonical shapes and path isolation, same-day regime sharing,
+GRU/Adapter gradients, strict checkpoint state, and unchanged baseline paths.
 
-The CPU smoke uses one epoch with two train and two validation batches. Its
-trained checkpoint assigned 10 test trading days to 5 of 8 codes, with counts
-`[0, 0, 4, 1, 1, 0, 2, 2]`; every daily cross-section shared exactly one code.
-This tiny diagnostic shows no immediate single-code collapse but is not a
-substitute for the formal run.
+The isolated CPU smoke runs one epoch with two training and two validation
+batches. It produced
+`artifacts/013/smoke/checkpoints/alphamaster_smoke-epoch=0-val_loss=0.5791.ckpt`,
+strict-loaded it in Stage 2, emitted the standard 40-row prediction and metric
+files, and passed the existing backtest input normalizer. Ten test trading days
+used 4 of 8 codes with counts `[0, 0, 4, 1, 0, 0, 1, 4]`; every daily
+cross-section shared exactly one code. These tiny-run diagnostics verify the
+pipeline only and are not formal experiment results.
 
-Artifacts, report, and logs are isolated under `artifacts/012/smoke/`.
+All smoke artifacts, logs, and the machine-readable report are isolated under
+`artifacts/013/smoke/`.

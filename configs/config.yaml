@@ -19,12 +19,13 @@ alphamaster:
     bidirectional: false
     dropout: 0
   market_quantizer:
-    type: standard_vq
+    type: ema_vq
     codebook_size: 8
     embedding_dim: 63
     distance: l2
     straight_through: true
     commitment_weight: 0.25
+    decay: 0.99
   market_adapter:
     type: linear
     input_size: 63

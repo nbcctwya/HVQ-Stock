@@ -2,7 +2,7 @@
 
 The original current-market feature gate and complete stock backbone are kept
 intact. A lightweight GRU encodes the previous 19 market observations, a
-standard vector quantizer maps the continuous state to a reusable regime, and
+EMA vector quantizer maps the continuous state to a reusable regime, and
 a zero-initialized linear hypernetwork adds a decoder-weight residual.
 """
 
@@ -191,23 +191,56 @@ class VectorQuantizerOutput(NamedTuple):
     indices: torch.Tensor
 
 
-class StandardVectorQuantizer(nn.Module):
-    """L2 nearest-neighbor VQ with a standard straight-through estimator."""
+class EMAVectorQuantizer(nn.Module):
+    """L2 nearest-neighbor VQ with EMA codebook updates and an STE."""
 
-    def __init__(self, codebook_size=8, embedding_dim=63, commitment_weight=0.25):
+    def __init__(
+        self,
+        codebook_size=8,
+        embedding_dim=63,
+        commitment_weight=0.25,
+        decay=0.99,
+    ):
         super().__init__()
         if codebook_size <= 0 or embedding_dim <= 0:
             raise ValueError("VQ codebook size and embedding dimension must be positive")
         if commitment_weight < 0:
             raise ValueError("VQ commitment weight must be non-negative")
+        if not 0.0 <= decay < 1.0:
+            raise ValueError("EMA decay must be in [0, 1)")
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
         self.commitment_weight = commitment_weight
+        self.decay = decay
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
         nn.init.uniform_(
             self.embedding.weight,
             -1.0 / codebook_size,
             1.0 / codebook_size,
+        )
+        self.embedding.weight.requires_grad_(False)
+        # One initial pseudo-observation per code keeps unused prototypes fixed
+        # and avoids unstable normalization during the first EMA updates.
+        self.register_buffer("ema_cluster_size", torch.ones(codebook_size))
+        self.register_buffer(
+            "ema_embedding_sum", self.embedding.weight.detach().clone()
+        )
+
+    @torch.no_grad()
+    def _update_codebook(self, flat_inputs, flat_indices):
+        assignments = F.one_hot(
+            flat_indices, num_classes=self.codebook_size
+        ).to(dtype=flat_inputs.dtype)
+        batch_cluster_size = assignments.sum(dim=0)
+        batch_embedding_sum = assignments.t() @ flat_inputs.detach()
+        self.ema_cluster_size.mul_(self.decay).add_(
+            batch_cluster_size, alpha=1.0 - self.decay
+        )
+        self.ema_embedding_sum.mul_(self.decay).add_(
+            batch_embedding_sum, alpha=1.0 - self.decay
+        )
+        self.embedding.weight.copy_(
+            self.ema_embedding_sum / self.ema_cluster_size.unsqueeze(1)
         )
 
     def forward(self, inputs):
@@ -226,7 +259,10 @@ class StandardVectorQuantizer(nn.Module):
         flat_indices = torch.argmin(distances, dim=1)
         quantized = self.embedding(flat_indices).view_as(inputs)
 
-        codebook_loss = F.mse_loss(quantized, inputs.detach())
+        # Keep the 012 VQ-loss scalar unchanged for logging, validation, and
+        # checkpoint selection. Detaching this term ensures the codebook is
+        # updated exclusively by EMA rather than ordinary gradients.
+        codebook_loss = F.mse_loss(quantized.detach(), inputs.detach())
         commitment_loss = F.mse_loss(inputs, quantized.detach())
         loss = codebook_loss + self.commitment_weight * commitment_loss
         # Forward values are exactly the selected embeddings, while gradients
@@ -234,6 +270,8 @@ class StandardVectorQuantizer(nn.Module):
         # every member of one cross-section bitwise-share its regime vector.
         quantized_st = quantized.detach() + (inputs - inputs.detach())
         indices = flat_indices.view(inputs.shape[:-1])
+        if self.training:
+            self._update_codebook(flat_inputs, flat_indices)
         return VectorQuantizerOutput(
             quantized_st,
             loss,
@@ -275,6 +313,7 @@ class MASTER(nn.Module):
         market_vq_codebook_size=8,
         market_vq_embedding_dim=63,
         market_vq_commitment_weight=0.25,
+        market_vq_decay=0.99,
         market_adapter_output_size=256,
     ):
         super().__init__()
@@ -316,10 +355,11 @@ class MASTER(nn.Module):
         # unchanged; only the formal forward graph gains this new module.
         if market_vq_embedding_dim != market_encoder_hidden_size:
             raise ValueError("VQ embedding dimension must match market state width")
-        self.market_quantizer = StandardVectorQuantizer(
+        self.market_quantizer = EMAVectorQuantizer(
             codebook_size=market_vq_codebook_size,
             embedding_dim=market_vq_embedding_dim,
             commitment_weight=market_vq_commitment_weight,
+            decay=market_vq_decay,
         )
 
     def forward(self, x, return_vq_output=False):

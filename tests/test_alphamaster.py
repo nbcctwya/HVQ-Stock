@@ -1,4 +1,4 @@
-"""Discrete historical-market adapter AlphaMaster tests."""
+"""EMA-quantized historical-market adapter AlphaMaster tests."""
 
 import importlib.util
 import tempfile
@@ -11,7 +11,7 @@ import yaml
 
 from dataset.dataset import init_data_loader
 from dataset.schema import GROUP_SLICES, TOTAL_DIM
-from module.alphamaster import MASTER, StandardVectorQuantizer
+from module.alphamaster import EMAVectorQuantizer, MASTER
 from trainer.train_alphamaster import AlphaMasterModule
 
 
@@ -45,7 +45,7 @@ class AlphaMasterTest(unittest.TestCase):
         torch.manual_seed(7)
         self.batch = torch.randn(6, 20, TOTAL_DIM)
 
-    def test_default_config_is_discrete_historical_market_adapter(self):
+    def test_default_config_is_ema_historical_market_adapter(self):
         config = load_config()
         self.assertEqual(config["train"]["seed"], 0)
         self.assertEqual(config["train"]["learning_rate"], 8e-6)
@@ -70,12 +70,13 @@ class AlphaMasterTest(unittest.TestCase):
                 "dropout": 0,
             },
             "market_quantizer": {
-                "type": "standard_vq",
+                "type": "ema_vq",
                 "codebook_size": 8,
                 "embedding_dim": 63,
                 "distance": "l2",
                 "straight_through": True,
                 "commitment_weight": 0.25,
+                "decay": 0.99,
             },
             "market_adapter": {
                 "type": "linear",
@@ -149,6 +150,8 @@ class AlphaMasterTest(unittest.TestCase):
         self.assertEqual(model.master.market_quantizer.embedding_dim, 63)
         self.assertEqual(model.master.market_quantizer.embedding.weight.shape, (8, 63))
         self.assertEqual(model.master.market_quantizer.commitment_weight, 0.25)
+        self.assertEqual(model.master.market_quantizer.decay, 0.99)
+        self.assertFalse(model.master.market_quantizer.embedding.weight.requires_grad)
         torch.testing.assert_close(
             captured["vq_input"], captured["market_state"], rtol=0, atol=0
         )
@@ -182,21 +185,24 @@ class AlphaMasterTest(unittest.TestCase):
         torch.manual_seed(31)
         reference_007 = standalone.MASTER(beta=10).eval()
         torch.manual_seed(31)
-        model_012 = MASTER(beta=10).eval()
+        model_013 = MASTER(beta=10).eval()
         reference_state = reference_007.state_dict()
         for name, value in reference_state.items():
             torch.testing.assert_close(
-                model_012.state_dict()[name], value, rtol=0, atol=0
+                model_013.state_dict()[name], value, rtol=0, atol=0
             )
         features = torch.randn(5, 20, 221)
         torch.testing.assert_close(
-            model_012(features), reference_007(features), rtol=0, atol=0
+            model_013(features), reference_007(features), rtol=0, atol=0
         )
 
-    def test_standard_vq_loss_is_finite_and_straight_through(self):
-        quantizer = StandardVectorQuantizer(
-            codebook_size=8, embedding_dim=63, commitment_weight=0.25
-        )
+    def test_ema_vq_preserves_loss_value_and_straight_through(self):
+        quantizer = EMAVectorQuantizer(
+            codebook_size=8,
+            embedding_dim=63,
+            commitment_weight=0.25,
+            decay=0.99,
+        ).eval()
         inputs = torch.randn(5, 63, requires_grad=True)
         output = quantizer(inputs)
         self.assertEqual(output.quantized.shape, inputs.shape)
@@ -219,8 +225,36 @@ class AlphaMasterTest(unittest.TestCase):
         output.loss.backward()
         self.assertIsNotNone(inputs.grad)
         self.assertGreater(inputs.grad.abs().sum().item(), 0)
-        self.assertIsNotNone(quantizer.embedding.weight.grad)
-        self.assertGreater(quantizer.embedding.weight.grad.abs().sum().item(), 0)
+        self.assertIsNone(quantizer.embedding.weight.grad)
+
+    def test_ema_codebook_update_matches_decay_and_stops_in_eval(self):
+        quantizer = EMAVectorQuantizer(
+            codebook_size=2,
+            embedding_dim=2,
+            commitment_weight=0.25,
+            decay=0.99,
+        )
+        with torch.no_grad():
+            initial = torch.tensor([[0.0, 0.0], [10.0, 10.0]])
+            quantizer.embedding.weight.copy_(initial)
+            quantizer.ema_embedding_sum.copy_(initial)
+            quantizer.ema_cluster_size.fill_(1.0)
+        inputs = torch.tensor([[2.0, 4.0], [4.0, 6.0]])
+        output = quantizer.train()(inputs)
+        self.assertTrue(torch.equal(output.indices, torch.zeros(2, dtype=torch.long)))
+        expected_counts = torch.tensor([1.01, 0.99])
+        expected_sums = torch.tensor([[0.06, 0.10], [9.90, 9.90]])
+        torch.testing.assert_close(quantizer.ema_cluster_size, expected_counts)
+        torch.testing.assert_close(quantizer.ema_embedding_sum, expected_sums)
+        torch.testing.assert_close(
+            quantizer.embedding.weight,
+            expected_sums / expected_counts.unsqueeze(1),
+        )
+        trained_weight = quantizer.embedding.weight.detach().clone()
+        trained_counts = quantizer.ema_cluster_size.detach().clone()
+        quantizer.eval()(torch.tensor([[100.0, 100.0]]))
+        torch.testing.assert_close(quantizer.embedding.weight, trained_weight, rtol=0, atol=0)
+        torch.testing.assert_close(quantizer.ema_cluster_size, trained_counts, rtol=0, atol=0)
 
     def test_market_paths_are_decoupled(self):
         model = AlphaMasterModule(load_config()).eval()
@@ -346,23 +380,24 @@ class AlphaMasterTest(unittest.TestCase):
             atol=2e-7,
         )
 
-    def test_vq_gru_and_adapter_receive_gradients_and_update(self):
+    def test_ema_vq_gru_and_adapter_update_through_expected_paths(self):
         model = AlphaMasterModule(load_config()).train()
         stock, market, target = model._get_data(self.batch)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
-        initial_parameters = {
+        initial_values = {
             "adapter": model.master.market_adapter.weight.detach().clone(),
             "codebook": model.master.market_quantizer.embedding.weight.detach().clone(),
             "gru": model.master.market_encoder.gru.weight_ih_l0.detach().clone(),
         }
         prediction, vq_output = model(stock, market, return_vq_output=True)
+        codebook_after_ema = model.master.market_quantizer.embedding.weight.detach().clone()
+        self.assertFalse(torch.equal(initial_values["codebook"], codebook_after_ema))
         loss = model.loss_fn(prediction, target) + vq_output.loss
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
         gradients = {
             "adapter": model.master.market_adapter.weight.grad,
-            "codebook": model.master.market_quantizer.embedding.weight.grad,
             "gru": model.master.market_encoder.gru.weight_ih_l0.grad,
         }
         for name, gradient in gradients.items():
@@ -370,14 +405,19 @@ class AlphaMasterTest(unittest.TestCase):
                 self.assertIsNotNone(gradient)
                 self.assertGreater(gradient.abs().sum().item(), 0)
         optimizer.step()
+        torch.testing.assert_close(
+            model.master.market_quantizer.embedding.weight,
+            codebook_after_ema,
+            rtol=0,
+            atol=0,
+        )
         updated_parameters = {
             "adapter": model.master.market_adapter.weight,
-            "codebook": model.master.market_quantizer.embedding.weight,
             "gru": model.master.market_encoder.gru.weight_ih_l0,
         }
         for name, parameter in updated_parameters.items():
             with self.subTest(parameter=name):
-                self.assertFalse(torch.equal(initial_parameters[name], parameter))
+                self.assertFalse(torch.equal(initial_values[name], parameter))
 
     def test_csi300_and_sp500_forward_with_expected_beta(self):
         for universe, beta in (("csi300", 10), ("sp500", 5)):
