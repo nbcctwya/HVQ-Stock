@@ -140,3 +140,10 @@ experiments:
     commit: 2fe5c384734ae553d2b6070fe9fbe5002ebfd387
     status: pending
     stage1_source: self
+  - id: "015"
+    name: alphamaster-vq-continuous-warmup
+    base: exp/012-alphamaster-discrete-market-adapter
+    branch: exp/015-alphamaster-vq-continuous-warmup
+    commit: bf4736892a94287de656b655016400bd67885618
+    status: pending
+    stage1_source: self
