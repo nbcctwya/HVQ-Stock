@@ -92,6 +92,7 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  market_conditioned_routing: true
   
 train:
   seed: 0 # 

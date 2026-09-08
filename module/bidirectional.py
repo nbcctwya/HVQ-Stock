@@ -53,9 +53,12 @@ class LoadingGenerator(nn.Module):
             moe_k=config['predictor']['k'],
             hidden_size=config['predictor']['moe_hidden'],
             drop=config['predictor']['dropout'],
+            market_conditioned_routing=config['predictor'].get(
+                'market_conditioned_routing', False
+            ),
         )
 
-    def forward(self, feature, z_q):
+    def forward(self, feature, z_q, market_state=None):
         """
         Args:
             feature: (B, T, 158)
@@ -73,6 +76,8 @@ class LoadingGenerator(nn.Module):
         temp_feature = self.temporal_transformer(dlinear_out, z_q) # (B, pred_len, d_model) -> (B, pred_len, d_model)
 
         # ---- 2. Advanced MoE with Cross-Attention ----
-        alpha, beta_p, beta_l, total_moe_loss = self.fusion(h=temp_feature, z=z_q) # (B, T, d_model), (B,64) -> outputs
+        alpha, beta_p, beta_l, total_moe_loss = self.fusion(
+            h=temp_feature, z=z_q, market_state=market_state
+        ) # (B, T, d_model), (B,64) -> outputs
 
         return alpha, beta_p, beta_l, total_moe_loss
