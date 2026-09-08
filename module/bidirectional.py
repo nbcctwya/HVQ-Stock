@@ -54,6 +54,7 @@ class LoadingGenerator(nn.Module):
             hidden_size=config['predictor']['moe_hidden'],
             drop=config['predictor']['dropout'],
             use_shared_expert=config['predictor'].get('shared_expert', False),
+            decoupling_lambda=config['predictor'].get('decoupling_lambda', 0.0),
         )
 
     def forward(self, feature, z_q):
@@ -65,7 +66,7 @@ class LoadingGenerator(nn.Module):
             alpha: (B,) # mixing coefficient
             beta_p: (B, num_prior_factors) # prior factors
             beta_l: (B, vq_dim) # latent factors
-            total_moe_loss: scalar # MoE importance loss
+            total_moe_loss: scalar # MoE importance + optional decoupling loss
         """
         # ---- 0. DLinear ----
         dlinear_out = self.dliner(feature) # (B, T, 158) -> (B, pred_len, 158)

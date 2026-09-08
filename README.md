@@ -1,67 +1,69 @@
-# 010 — prism-shared-routed-moe
+# 017 — shared-routed-decoupling
 
 ## Base
 
-`main`（原始 PRISM-VQ baseline；single VQ512，Stage 2 seed 0）。
+`exp/010-prism-shared-routed-moe`。
 
-Stage 1 不重新训练，复用当前本地 corrected PRISM-VQ baseline 的 exact
-checkpoint：
+本实验只修改 Stage 2，Stage 1 明确复用实验 010 的 exact checkpoint。010 的
+`artifacts/010/run/.stage1.done` 所记录 commit 与 canonical queue pinned
+commit 均为 `9b854f0436f8a7c3283fd375661dd6152cc965f1`；marker 指向 corrected
+PRISM-VQ baseline 的 single VQ512 checkpoint：
 
 `artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt`
 
-该文件与 `../PRISM-VQ/checkpoints/` 中的原始文件字节一致。RevIN、
-SpatialEncoder、VectorQuantizer 均已 strict 加载验证，missing=0、
-unexpected=0。
+该 checkpoint 为 14,584,929 bytes。RevIN、SpatialEncoder、VectorQuantiser
+strict 加载均为 missing=0、unexpected=0，且数据划分与 010 一致。
 
 ## Idea / Motivation
 
-PRISM-VQ 用 `z_q` 对 sample 进行 latent-state-conditioned sparse expert
-routing，但不同 latent state 之间也可能存在稳定共享的收益预测结构。纯
-sparse routing 可能迫使 routed experts 重复学习这些 common patterns。
+010 用 always-on Shared Expert 学习 common structure，并用 `z_q`-conditioned
+Routed Experts 学习 latent-state-specific structure，但固定相加本身无法阻止
+两条路径学习重复表示。本实验显式惩罚同一 sample 上两条路径输出的相关性：
 
-本实验把 Stage 2 MoE 显式拆成共享与专门化两部分：
+```text
+moe_out = shared_out + routed_out
+L_dec = mean(cosine_similarity(shared_out, routed_out)^2)
+L_moe = L_route + 0.01 * L_dec
+```
 
-`moe_out = E_shared(h) + sum_j g_j(z_q) E_j(h)`
-
-目标是让 always-on Shared Expert 学习跨 latent state 的公共结构，让原有
-Routed Experts 更专注于 `z_q` 区分的 specialized structure。
+假设是轻量的 Shared–Routed Decoupling Regularization 能促进互补表示和更清晰
+的 expert specialization，从而改善预测与投资组合表现。
 
 ## 核心修改
 
-- `FactorGatedMoE` 新增且仅新增一个 always-on Shared Expert。
-- Shared Expert 与单个 routed expert 使用完全相同的
-  `SimpleMLP(expert_input_size, expert_input_size, hidden_size)` 结构。
-- Shared Expert 接收完整 batch 的 `h`，不经过 `SparseDispatcher`，不参与
-  routing，也不占 top-k quota。
-- Shared Expert 最终 Linear 的 weight 与 bias 显式 zero-init，初始化时
-  `shared_out` 逐位为 0；最终输出仅做 `shared_out + routed_out`。
-- `configs/config.yaml` 默认设置 `predictor.shared_expert: true`，直接运行
-  默认配置即启用本实验结构。
+- `FactorGatedMoE` 对每个 sample 的 `shared_out` 与 `routed_out` 沿表示维计算
+  cosine similarity，平方后对 batch 取均值。
+- cosine 计算提升到 float32，并使用 `eps=1e-8` 稳定零范数情形；loss 有限且
+  非负。
+- 固定 `lambda_dec=0.01`，仅将 `0.01 * L_dec` 追加到原 `L_route`。
+- 默认 `configs/config.yaml` 设置 `predictor.decoupling_lambda: 0.01`，无需
+  实验特有 CLI override。
+- 新增机制回归测试和最小 Stage 2 smoke 脚本；没有新增可训练参数。
 
 ## 与 base 的区别
 
-唯一实验变量是 Stage 2 `FactorGatedMoE` 的输出从 routed-only 改成一个
-zero-initialized shared residual 加原 routed output。原 routed experts 数量、
-`k`、router、noisy top-k、`W_h`、SparseDispatcher、combine 逻辑及 routed
-importance/load-balancing loss 均不变。
+唯一实验变量是新增上述 decoupling auxiliary loss。010 的 prediction forward
+融合仍逐字保持 `shared_out + routed_out`；Shared Expert、Routed Experts、router、
+noisy top-k、2 experts、`k=1`、`W_h`、SparseDispatcher、expert combine 以及
+原 importance/load-balancing loss 的定义和权重均不变。
 
-Stage 1、canonical dataset（包括 market63 继续 unused）、DLinear、Temporal
-Transformer、`z_q` structure token、HyperFusion 后续 FiLM/alpha/beta heads、
-LatentValueHead、prior13、ReturnPredictor、loss family、aux 权重、数据划分、
-训练预算、seed 与回测协议均保持 `main` 不变。
+Stage 1 single VQ512、canonical `158 stock + 13 prior + 63 market + 10 returns`
+schema、market63 unused 行为、DLinear、Temporal Transformer、FiLM、alpha/beta
+heads、LatentValueHead、ReturnPredictor、loss family、数据划分、70 epoch 预算、
+early stopping、Stage 1 seed 42、Stage 2 seed 0、Top30/Drop5 回测协议与其他
+超参数均保持 010 不变；没有 adaptive fusion 或其他新机制。
 
 ## Smoke 状态
 
-Status: **PASS**（仓库完整单元测试 91/91，本实验机制测试 9/9）。
+Status: **PASS**。
 
-已通过：
+- `conda run -n prism-vq python -m unittest discover -s tests -v`：98/98 PASS；
+  其中 017 新增测试 7/7 PASS，010 Shared/Routed 回归测试 9/9 PASS。
+- `scripts/smoke_shared_routed_decoupling.py`：PASS。验证了非零 Shared output
+  条件下 prediction 与 010 逐位一致、route loss 逐位不变、组合 loss 公式、
+  decoupling 双路径有效梯度、真实 Stage 2 backward/update、Stage 1 strict
+  兼容、checkpoint strict round-trip、valid/test inference 和标准回测输入格式。
+- 产物：`artifacts/017/smoke/`（`unit_tests.log`、`stage2.log`、
+  `smoke_report.json`、`checkpoints/`、`res/`）。
 
-- `tests/test_shared_routed_moe.py` 的机制与等价性测试；
-- 仓库完整单元测试；
-- `scripts/smoke_shared_routed_moe.py` 的最小真实 Stage 2 shared+routed
-  forward/backward、参数更新、checkpoint save/load、valid/test inference 与
-  标准 prediction/metric 兼容性检查。
-
-Smoke 产物统一写入 `artifacts/010/smoke/`；机器可读结论见
-`smoke_report.json`，执行日志见 `stage2.log` 与 `unit_tests.log`。本阶段未
-启动正式长时间训练或正式回测。
+本阶段未启动正式长时间训练或正式回测。
