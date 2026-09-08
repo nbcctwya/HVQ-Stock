@@ -159,7 +159,7 @@ experiments:
     base: exp/010-prism-shared-routed-moe
     branch: exp/017-shared-routed-decoupling
     commit: c82f2f6ec9248835037f8c956772fe58da2d5abe
-    status: running
+    status: done
     stage1_source: "010"
   - id: "018"
     name: adaptive-shared-decoupling
