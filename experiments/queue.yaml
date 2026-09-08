@@ -147,3 +147,10 @@ experiments:
     commit: bf4736892a94287de656b655016400bd67885618
     status: done
     stage1_source: self
+  - id: "016"
+    name: latent-adaptive-shared-fusion
+    base: exp/010-prism-shared-routed-moe
+    branch: exp/016-latent-adaptive-shared-fusion
+    commit: f0157c7c23cbf7c4749ace313c10b21354e307ba
+    status: pending
+    stage1_source: "010"
