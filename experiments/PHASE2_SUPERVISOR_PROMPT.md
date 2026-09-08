@@ -37,6 +37,10 @@ executor；Supervisor 只在外层负责逐实验编排、错误分类和安全�
        （至少 tests/test_runner.py），再利用 resume 继续 batch。
 5. 邮件通知（Supervisor 层，统一调用 experiments/notify.py，
    不得自己临时实现 SMTP）：
+   - 调用方式注意：SMTP 凭据（QQ_SMTP_EMAIL / QQ_SMTP_AUTH_CODE /
+     RESEARCH_NOTIFY_EMAIL）配置在 ~/.bashrc 中，非交互、非 login
+     shell 不会加载它；调用 notify.py 时必须通过 login shell 执行
+     （bash -lc '...'），或先确认当前 shell 已存在这三个环境变量。
    - 整个 batch 正常处理结束后：生成一份纯文本 summary（正文要求见
      PHASE2_RULES.md 第 9 节），写入临时文件后调用：
          python experiments/notify.py \

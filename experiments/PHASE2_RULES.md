@@ -168,6 +168,11 @@ Phase 2 必要时只允许修改：
 Supervisor 统一调用它，不得自己临时实现 SMTP；`runner.py` 不参与任何
 通知逻辑。
 
+凭据加载注意：`QQ_SMTP_EMAIL` / `QQ_SMTP_AUTH_CODE` /
+`RESEARCH_NOTIFY_EMAIL` 配置在 `~/.bashrc` 中，非交互、非 login shell
+不会加载该文件；调用 `notify.py` 时必须通过 login shell（
+`bash -lc '...'`），或先确认当前 shell 已存在这三个环境变量。
+
 触发策略：
 
 - 单个实验 DONE：**不发**邮件；
