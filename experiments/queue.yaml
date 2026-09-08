@@ -168,3 +168,15 @@ experiments:
     commit: 8756e8b6be4f0ca00b4e151198b1915e10c6bb65
     status: pending
     stage1_source: "010"
+  - id: "019"
+    name: quantization-confidence-adapter
+    base: main
+    branch: exp/019-quantization-confidence-adapter
+    commit: f2a928889448e3671755b4277fdc969801238a62
+    status: pending
+    stage1_source: external
+    # Corrected PRISM-VQ baseline exact Stage 1 (single VQ512, seed 42).
+    # This local artifact is byte-identical to the original PRISM-VQ file;
+    # artifacts/ is gitignored, so a plain clone must restore it explicitly.
+    # Missing/empty files fail loudly and never trigger Stage 1 self-training.
+    stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
