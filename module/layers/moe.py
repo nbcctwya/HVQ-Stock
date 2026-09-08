@@ -252,7 +252,21 @@ class FactorGatedMoE(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
+    def clean_routing_logits(self, x, transition_bias=None):
+        """Original router logits plus the optional transition-aware bias."""
+        clean_logits = self.gate(x)
+        if transition_bias is None:
+            return clean_logits
+        if transition_bias.shape != clean_logits.shape:
+            raise ValueError(
+                f"transition_bias must match clean logits shape "
+                f"{tuple(clean_logits.shape)}, got {tuple(transition_bias.shape)}"
+            )
+        return clean_logits + transition_bias.to(
+            device=clean_logits.device, dtype=clean_logits.dtype
+        )
+
+    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2, transition_bias=None):
         """Noisy top-k gating.
         See paper: https://arxiv.org/abs/1701.06538.
         Args:
@@ -263,7 +277,7 @@ class FactorGatedMoE(nn.Module):
           gates: a Tensor with shape [batch_size, num_experts]
           load: a Tensor with shape [num_experts]
         """
-        clean_logits = self.gate(x)
+        clean_logits = self.clean_routing_logits(x, transition_bias)
 
         if self.noisy_gating and train:
             raw_noise_stddev = self.noise(x)
@@ -296,7 +310,7 @@ class FactorGatedMoE(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
 
-    def forward(self, x, z, loss_coef=1): #1e-2):
+    def forward(self, x, z, loss_coef=1, transition_bias=None): #1e-2):
         """Args:
         x: tensor shape [batch_size, input_size]
         train: a boolean scalar.
@@ -308,7 +322,9 @@ class FactorGatedMoE(nn.Module):
         training loss of the model.  The backpropagation of this loss
         encourages all experts to be approximately equally used across a batch.
         """
-        gates, load = self.noisy_top_k_gating(z, self.training)
+        gates, load = self.noisy_top_k_gating(
+            z, self.training, transition_bias=transition_bias
+        )
         # calculate importance loss
         importance = gates.sum(0)
         loss = self.cv_squared(importance) + self.cv_squared(load)

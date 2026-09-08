@@ -1,159 +1,171 @@
-# Vector-Quantized Discrete Latent Factors Meet Financial Priors: Dynamic Cross-Sectional Stock Ranking Prediction for Portfolio Construction
+# Experiment 024 — VQ Transition-Aware Routing
 
-<div align="center">
+## Base
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status](https://img.shields.io/badge/Status-Accepted-brightgreen.svg)](https://github.com)
+This experiment is based directly on `main`, the corrected original PRISM-VQ
+baseline. It changes only the Stage 2 MoE clean routing logits and reuses the
+external corrected PRISM-VQ Stage 1 checkpoint.
 
-</div>
+## Idea / Motivation
 
-This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
+In the baseline, the MoE router selects experts purely from the current
+quantized latent state:
 
-## Canonical dataset on main
-
-HVQ main has one dataset schema: **158 stock + 13 prior + 63 market +
-10 future returns = 244 dimensions**, for **CSI300 and SP500 only**. Data is
-built directly from Qlib and raw JKP factor CSVs; no pre-existing dataset
-pickle is needed. Other batch widths fail explicitly.
-
-CSI300 uses CN market63 (`sh000300`, `sh000852`, `sh000905`); SP500 uses US
-market63 (`^gspc`, `^dji`, `^ndx`). Market remains an independent group,
-separate from the 158 stock features. The current baseline parses it but does
-not use it; later experiments may study market-aware mechanisms.
-
-Experiments **001–006** are frozen. Reproduce their historical data/model
-conventions by checking out the corresponding branch and regenerating its
-own data; they are outside main's current dataset specification.
-
-See [dataset/README.md](dataset/README.md) for generation, naming, parsing,
-and dataset smoke checks without training.
-
-## Baseline Results Protocol v1.0
-
-The repository includes a non-invasive adapter that evaluates the existing
-CSI300 and S&P 500 seed predictions under a common Qlib protocol.  It does not
-replace training or the project's native backtest outputs.  Generate and
-validate the comparable artifacts with:
-
-```bash
-conda run -n prism-vq python generate_baseline_results.py --out results
-conda run -n prism-vq python inspect_eval_results.py --out results
-conda run -n prism-vq python -m unittest -v tests/test_protocol_metrics.py
+```text
+clean_logits = Router(z_q,t)          # P(expert | current latent state)
 ```
 
-`results/metrics/` contains numeric seed, aggregate, and independently
-re-backtested ensemble metrics.  `results/tables/` contains four-decimal
-display tables only, `results/curves/ensemble/` contains daily gross return,
-cost, net return, benchmark return, and NAV series, and `results/metadata/`
-records the discovered data split and complete evaluation convention.
-`results/diagnostics/validation.json` is the machine-readable validation
-report.  No extra cache or artifact directory is written inside `results/`;
-the validator reconstructs the ensemble score from the seed predictions when
-needed.
+The same current discrete state can be reached by very different state
+evolution paths, e.g. `37 -> 37 -> 37 -> 37 -> 37` (stable dwelling) versus
+`12 -> 18 -> 25 -> 31 -> 37` (rapid recent migration). The historical
+latent-state transition trajectory may carry state dynamics that the current
+`z_q` alone cannot express, so this experiment tests whether
 
-Prediction metrics are daily cross-sectional Pearson IC and Spearman RankIC;
-their IR values use daily sample standard deviation (`ddof=1`) without annual
-scaling.  Portfolio metrics use `log1p(gross_return - cost)`, 252 trading days,
-sample standard deviation, zero risk-free rate, and zero daily MAR.  The
-protocol backtest uses Qlib `TopkDropoutStrategy` with TopK=30, DropN=5 and the
-full fixed configuration recorded in `results/metadata/eval_config.json`.
-
-📄 **Paper**: Accepted at IJCAI-ECAI 2026
-
----
-
-## 📋 Abstract
-
-Stock return prediction presents several unique challenges that motivate our architectural design. Financial time series exhibit extremely low signal-to-noise ratios, with predictable components often masked by market microstructure noise and idiosyncratic shocks. Additionally, stocks do not evolve independently—their returns exhibit complex cross-sectional dependencies driven by industry relationships, supply chain connections, and correlated investor behavior. Market regimes shift over time, requiring models to adapt factor loadings dynamically rather than assuming stationarity. Finally, practitioners require interpretable models that align with financial theory, as black-box predictions are difficult to validate and deploy in regulated environments.
-
-<div align="center">
-  <img src="images/detailed-prism.png" alt="PRISM-VQ Architecture" width="100%"/>
-  <p><em>Architecture of PRISM-VQ. The spatial learning stage (left) learns discrete stock representations via vector quantization over cross-sectional features. The temporal learning stage (right) uses these discrete codes to gate expert networks, generating dynamic factor loadings that fuse expert prior factors and learned latent factors for return prediction.</em></p>
-</div>
-
-## 🎯 Key Contributions
-
-- **Unified Framework**: We propose PRISM-VQ, a unified dynamic factor model that systematically integrates expert prior factors, data-driven discrete latent factors, and adaptive temporal modeling. To our knowledge, this is the first framework to combine these three components within a principled factor model structure.
-
-- **Vector Quantization**: We introduce vector quantization as an inductive bias for learning robust cross-sectional factors in financial markets. We demonstrate that discrete representations provide superior regularization compared to continuous alternatives in low signal-to-noise environments.
-
-## 🚀 Installation
-
-### 📦 Requirements
-
-```
-Python 3.11
-PyTorch 2.4.1
-Qlib 0.9.6.99
-Hydra & OmegaConf
+```text
+P(expert | current state, transition history)
 ```
 
-### 🔧 Setup
+improves expert routing over conditioning on the current state only.
 
-```bash
-# Clone the repository
-git clone https://github.com/x7jeon8gi/PRISM-VQ.git
-cd PRISM-VQ
+## Historical Code Sequence Construction
 
-# Install dependencies
-pip install -r requirements.txt
+`module/code_history.py` builds a deterministic, identity-keyed historical
+code context before training:
+
+1. Each split sampler's real MultiIndex provides every sample's
+   `(instrument, datetime)`; indices must be 2-level with `datetime` /
+   `instrument` levels and unique keys, otherwise the builder fails loudly.
+2. The exact frozen corrected Stage 1 (RevIN -> SpatialEncoder ->
+   VectorQuantiser, eval mode, `no_grad`) encodes every sample's stock
+   feature window into its VQ code `vq_idx`, in fixed positional order.
+   Only the stock-feature slice is read; future-return labels are never
+   touched.
+3. Split chronology is verified (all train datetimes < all valid datetimes <
+   all test datetimes; any violation fails loudly).
+4. For sample `(i, t)` only codes of the same instrument with
+   `datetime < t` are eligible: train samples read earlier train
+   observations, valid samples read earlier train + valid observations, test
+   samples read earlier train + valid + test observations. No sample can
+   ever read its own date or the future.
+5. Each sample keeps up to `L - 1 = 4` most recent history codes
+   (`hist_codes`, oldest first) plus the valid count (`hist_len`, 0..4).
+   Samples with insufficient history are never dropped and the train/valid/
+   test splits are unchanged.
+
+The per-sample history is bound to the dataset position by
+`TransitionHistoryDataset` (`init_data_loader(..., history=...)`), which
+emits `(hist_codes, hist_len, batch)` triples. Sample identity — not batch
+position or iteration order — determines the history, so training-date
+shuffling cannot change any sample's historical sequence. The code map
+depends only on the frozen Stage 1 checkpoint and the canonical data; a
+cache under the artifact root is accepted only when the checkpoint content
+hash and every split's index digest match exactly, and stale caches fail
+loudly.
+
+## Leakage Prevention
+
+- History is selected by `np.searchsorted(..., side="left")` on per-instrument
+  sorted datetimes, which enforces `datetime < t` strictly; an observation
+  can never read itself or any future code.
+- Duplicate `(instrument, datetime)` keys, malformed index schemas, and
+  non-increasing split chronology all raise immediately.
+- The builder never reads the label slice; unit tests poison future returns
+  with NaN and verify identical codes/histories.
+- Shuffle invariance is tested: two training epochs with different shuffle
+  seeds must yield identical `(data row -> history)` mappings.
+
+## Transition Representation
+
+No code embedding is learned. Prototypes are read directly from the frozen
+Stage 1 codebook and explicitly detached:
+
+```text
+e_k       = frozen_codebook[k].detach()
+delta_z_j = e_{k_j} - e_{k_{j-1}}        # consecutive prototype difference
 ```
 
-## 📊 Data Preparation
+For a sample with `m` valid history codes, the code chain
+`[k_{t-m}, ..., k_{t-1}, k_t]` yields exactly `m` transitions
+`[delta_z_{t-m+1}, ..., delta_z_t]` (including the explicit
+last-history -> current transition when `m < 4`). Padding codes are masked
+out and excluded from the GRU via packed sequences. The current code `k_t`
+always comes from the live quantizer output of the current forward — never
+from the cache. A single-layer unidirectional GRU (input 128 = codebook dim,
+hidden 64, no attention/Transformer) encodes the transition sequence; when
+`hist_len == 0` the transition state is exactly zero.
 
-The model uses two data sources:
+## Routing Injection
 
-1. **Qlib Data**: Stock market data from Qlib's data repository
-2. **JKP Global Factors**: Jensen, Kelly, and Pedersen (JKP) global factor data
-
-
-## 🏋️ Training
-
-The model training consists of two stages:
-
-### Stage 1: VQ-VAE Training
-```bash
-python stage1.py
+```text
+transition_state = GRU(delta_z sequence)          # R^64
+transition_bias  = W_t(transition_state)          # W_t: R^64 -> R^n_expert
+clean_logits     = Router(z_q,t) + transition_bias
 ```
 
-### Stage 2: Predictive Model Training
-```bash
-python stage2.py
+`W_t` (`transition_encoder.proj`) is explicitly zero-initialized (weight and
+bias), so at initialization `transition_bias == 0` and the complete model —
+clean logits, noisy gating, auxiliary loss, prediction forward — is bitwise
+identical to the baseline. The bias is added to the clean logits before
+noise injection and top-k, so the original noise network, `W_h`, top-k,
+softmax, `SparseDispatcher`, experts, and load-balancing loss all keep their
+baseline definitions and behavior.
+
+The branch is constructed under `torch.random.fork_rng`, so under the same
+seed every pre-existing baseline parameter is bitwise identical to `main`;
+only `transition_encoder.*` parameters are added.
+
+The default `configs/config.yaml` enables the experiment via
+`predictor.transition_aware_routing: true` (with the fixed
+`transition_history_len: 4` and `transition_gru_hidden: 64`); no
+experiment-specific CLI override is required.
+
+## Difference from Base
+
+The sole experimental variable is the additive VQ transition-aware routing
+bias on the MoE clean logits. The transition representation does not enter
+expert inputs, the Temporal Transformer, HyperFusion hidden representations,
+factor heads, `LatentValueHead`, `ReturnPredictor`, alpha/beta, the final
+prediction, or any other path, and it cannot backpropagate into Stage 1 (the
+codebook lookup is detached and the frozen modules stay in eval with no
+gradients). There is no transition-specific auxiliary loss. The router
+structure, expert count, top-k, dispatcher, load-balancing loss and
+`aux_weight`, data splits, daily batching, train-date shuffle, training
+budget, early stopping, optimizer, learning rate, seed protocol, and
+prediction/backtest protocols are all unchanged. No shared expert, adaptive
+fusion, decoupling, quantization confidence, market-conditioned routing,
+prior-latent allocation, code-aware bias, or continuous residual correction
+mechanism is introduced.
+
+Stage 1 provenance:
+
+```text
+external
+artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
 ```
 
-### ⚙️ Configuration
+This is the corrected PRISM-VQ exact single-VQ512, 128-dimensional Stage 1
+checkpoint trained with the fixed Stage 1 seed 42; it loads into this
+experiment's Stage 1 modules with `strict=True`.
 
-All model configurations are managed through Hydra configuration files located in `configs/`. Key parameters include:
+## Smoke Status
 
-- `data.universe`: Choose between 'sp500' or 'csi300'
-- `vqvae.num_embed`: Number of codebook entries
-- `predictor.n_expert`: Number of experts in MoE
-- `stage2_presets`: Market-specific Stage 2 defaults for checkpoint, auxiliary weight, MoE experts, and attention heads. `stage2.py` applies these automatically from `data.universe`.
+PASS. The full unit suite (121 tests) and the minimal smoke
+(`scripts/smoke_vq_transition_routing.py`) validate causal identity-keyed
+history construction, loud failure on duplicate keys / malformed indices /
+impossible chronology, shuffle-invariant history binding, label-free
+code-map construction, live-quantizer current codes, detached
+frozen-codebook lookups with no learnable code embedding,
+consecutive-difference transition semantics with padding excluded, zero
+state for empty history, zero-init bitwise equivalence with the baseline
+(clean logits, routing/load, MoE output/aux loss, full forward, noisy
+top-k/noise/`W_h`), bitwise initialization isolation of all pre-existing
+parameters, finite non-zero gradients and updates for `W_t` and the GRU,
+re-routing at fixed `z_q` once `W_t` is non-zero, GPU deterministic
+backward, strict checkpoint round-trip, standard inference/metrics, and
+backtest input normalization. Smoke artifacts — including history-length
+distributions, adjacent code change rates, zero-transition ratios, and valid
+transition sequence counts for both synthetic and real canonical splits —
+are isolated under `artifacts/024/smoke/`.
 
-
-## 📁 Project Structure
-
-```
-PRISM-VQ/
-├── 📂 configs/           # Hydra configuration files
-├── 📂 dataset/           # Data loading and processing
-├── 📂 module/            # Model architecture components
-│   ├── 📄 autoencoder.py
-│   ├── 📄 quantise.py
-│   └── 📂 layers/
-├── 📂 trainer/           # Training scripts
-├── 📂 utils/             # Utility functions
-├── 🚀 stage1.py          # Stage 1 training entry point
-└── 🚀 stage2.py          # Stage 2 training entry point
-```
-
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-We thank the Qlib team for providing the financial data infrastructure and the authors of the JKP factors for making their data publicly available. We also acknowledge the [CVQ-VAE](https://github.com/lyndonzheng/CVQ-VAE) project for inspiration on vector quantization techniques.
+No formal long-running training or portfolio backtest is performed in
+Phase 1.

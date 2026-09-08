@@ -55,11 +55,14 @@ class LoadingGenerator(nn.Module):
             drop=config['predictor']['dropout'],
         )
 
-    def forward(self, feature, z_q):
+    def forward(self, feature, z_q, transition_bias=None):
         """
         Args:
             feature: (B, T, 158)
             z_q: (B, vq_dim) # (B, 64)
+            transition_bias: (B, n_expert) optional additive bias on the MoE
+                clean routing logits (experiment 024); None keeps the base
+                routing exactly.
         Returns:
             alpha: (B,) # mixing coefficient
             beta_p: (B, num_prior_factors) # prior factors
@@ -73,6 +76,8 @@ class LoadingGenerator(nn.Module):
         temp_feature = self.temporal_transformer(dlinear_out, z_q) # (B, pred_len, d_model) -> (B, pred_len, d_model)
 
         # ---- 2. Advanced MoE with Cross-Attention ----
-        alpha, beta_p, beta_l, total_moe_loss = self.fusion(h=temp_feature, z=z_q) # (B, T, d_model), (B,64) -> outputs
+        alpha, beta_p, beta_l, total_moe_loss = self.fusion(
+            h=temp_feature, z=z_q, transition_bias=transition_bias
+        ) # (B, T, d_model), (B,64) -> outputs
 
         return alpha, beta_p, beta_l, total_moe_loss

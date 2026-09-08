@@ -13,6 +13,7 @@ from module.bidirectional import LoadingGenerator
 from utils import get_root_dir, calc_ic
 from utils.rankloss import RankLoss
 from module.quantise import VectorQuantiser
+from module.transition import VQTransitionEncoder
 from module.layers.encoder import SpatialEncoder
 from module.layers.decoder import ReconstructionDecoder
 from module.layers.src import RevIN
@@ -60,6 +61,9 @@ class GenerateReturn(pl.LightningModule):
         self.vq_embed_dim  = vqvae_cfg['vq_embed_dim']   # d (VQ / encoder output dim)
         self.seq_len       = vqvae_cfg['seq_len']        # T_window for reconstruction
         self.aux_imp       = config['predictor']['aux_imp']
+        self.transition_aware_routing = config['predictor'].get(
+            'transition_aware_routing', False
+        )
 
         # Quantizer
         self.decay         = vqvae_cfg['quantizer']['decay']
@@ -116,6 +120,32 @@ class GenerateReturn(pl.LightningModule):
         # 4. Factor Loading
         self.z_prior_norm = nn.LayerNorm(self.num_prior_factors)
         self.loadings = LoadingGenerator(config)
+
+        # 4b. VQ transition-aware routing branch (experiment 024).  Created
+        # after the frozen Stage 1 checkpoint is loaded so the branch reads
+        # the exact frozen codebook; its own constructor forks the RNG so
+        # every pre-existing baseline parameter stays bitwise identical.
+        if self.transition_aware_routing:
+            history_len = config['predictor'].get('transition_history_len', 4)
+            gru_hidden = config['predictor'].get('transition_gru_hidden', 64)
+            if history_len != 4 or gru_hidden != 64:
+                raise ValueError(
+                    "Experiment 024 fixes history_len=4 (L=5) and a single "
+                    f"GRU layer with hidden=64, got {history_len}/{gru_hidden}"
+                )
+            self.transition_encoder = VQTransitionEncoder(
+                codebook_weight=self.quantizer.embedding.weight,
+                num_experts=config['predictor']['n_expert'],
+                history_len=history_len,
+                gru_hidden=gru_hidden,
+            )
+            if self.transition_encoder.embed_dim != self.vq_embed_dim:
+                raise ValueError(
+                    "Transition GRU input must equal the 128-d frozen codebook "
+                    f"dimension, got {self.transition_encoder.embed_dim}"
+                )
+        else:
+            self.transition_encoder = None
         # LatentValueHead或许可魔改@@@   ***
         self.latent_value_head = LatentValueHead(
             d_latent=self.vq_embed_dim,
@@ -162,17 +192,22 @@ class GenerateReturn(pl.LightningModule):
         return [optimizer], [sch_config]
     
     def _get_data(self, batch, batch_idx):
+        hist_codes = hist_len = None
+        if getattr(self, 'transition_aware_routing', False):
+            # TransitionHistoryDataset binds (hist_codes, hist_len) to the
+            # sample's dataset position, independent of batch order.
+            hist_codes, hist_len, batch = batch
         batch   = batch.float()
         parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
         # market_feature is deliberately unused by the current baseline.
-        
+
         label = parts.target(self.target_index + 1)
 
-        return feature, prior_factor, label
-    
-    def forward(self, feature, prior_factor):
-        
+        return feature, prior_factor, hist_codes, hist_len, label
+
+    def forward(self, feature, prior_factor, hist_codes=None, hist_len=None):
+
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
@@ -180,7 +215,28 @@ class GenerateReturn(pl.LightningModule):
         z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
+        transition_bias = None
+        if self.transition_aware_routing:
+            if hist_codes is None or hist_len is None:
+                raise ValueError(
+                    "hist_codes/hist_len are required for transition-aware routing"
+                )
+            if hist_codes.shape[0] != feature.shape[0]:
+                raise ValueError(
+                    "history batch size must match stock feature batch size"
+                )
+            # The current code k_t must come from this forward's own live
+            # quantizer output, never from the cached code map.
+            check_vq_idx(vq_idx, self.num_embed)
+            transition_bias = self.transition_encoder(
+                hist_codes.to(device=feature.device),
+                hist_len.to(device=feature.device),
+                vq_idx.detach().long(),
+            )
+
+        alpha, beta_p, beta_l, loss_imp = self.loadings(
+            feature, z_q, transition_bias=transition_bias
+        )
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
         f_latent = self.latent_value_head(z_q)
@@ -197,8 +253,10 @@ class GenerateReturn(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, hist_codes, hist_len, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, hist_codes, hist_len
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss
@@ -212,8 +270,10 @@ class GenerateReturn(pl.LightningModule):
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, hist_codes, hist_len, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, hist_codes, hist_len
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss

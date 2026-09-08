@@ -9,6 +9,7 @@ from typing import Any, Iterator, List, Optional, Tuple
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 import copy
+import hashlib
 import hydra
 import pandas as pd
 import pickle
@@ -330,7 +331,8 @@ def _prepare_dataloaders(cfg: DictConfig,
     valid_loader, _ = init_data_loader(valid_prepare, shuffle=False, num_workers=num_workers)
     test_loader, _ = init_data_loader(test_prepare, shuffle=False, num_workers=num_workers)
 
-    return train_loader, valid_loader, test_loader, num_batches_per_epoch_train
+    prepares = {'train': train_prepare, 'valid': valid_prepare, 'test': test_prepare}
+    return train_loader, valid_loader, test_loader, num_batches_per_epoch_train, prepares
 
 
 def _make_absolute_saved_model_path(config_dict: dict) -> dict:
@@ -346,17 +348,63 @@ def _make_absolute_saved_model_path(config_dict: dict) -> dict:
     return model_config
 
 
+def _stage1_provenance_key(model_config: dict) -> str:
+    """Content-addressed identity of the exact frozen Stage 1 checkpoint."""
+    path = Path(model_config['predictor']['saved_model'])
+    digest = hashlib.md5()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return f"{path.name}:{digest.hexdigest()}"
+
+
 def train(cfg: DictConfig,
           config_dict: dict,
           train_loader,
           valid_loader,
           num_batches_per_epoch_train: int,
-          test_loader):
+          test_loader,
+          prepares=None):
     run_name = _build_run_name(cfg)
     model_config = _make_absolute_saved_model_path(config_dict)
 
     T_max = num_batches_per_epoch_train * cfg.train.num_epochs
     model = GenerateReturn(model_config, T_max=T_max)
+
+    if model.transition_aware_routing:
+        # Experiment 024: precompute the deterministic historical-code
+        # context with the exact frozen Stage 1 and bind it to sample
+        # identity (dataset position), then rebuild the loaders so every
+        # batch carries (hist_codes, hist_len) regardless of date shuffle.
+        if prepares is None:
+            raise RuntimeError(
+                "transition-aware routing requires the split samplers"
+            )
+        from module.code_history import build_code_history
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        cache_path = Path(get_root_dir()) / cfg.train.save_dir / "vq_code_history.pt"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        history = build_code_history(
+            model,
+            prepares,
+            history_len=cfg.predictor.get('transition_history_len', 4),
+            device=device,
+            cache_path=cache_path,
+            provenance_key=_stage1_provenance_key(model_config),
+        )
+        num_workers = cfg.train.num_workers
+        train_loader, num_batches_per_epoch_train = init_data_loader(
+            prepares['train'], shuffle=True, num_workers=num_workers,
+            history=history['train'])
+        valid_loader, _ = init_data_loader(
+            prepares['valid'], shuffle=False, num_workers=num_workers,
+            history=history['valid'])
+        test_loader, _ = init_data_loader(
+            prepares['test'], shuffle=False, num_workers=num_workers,
+            history=history['test'])
+        T_max = num_batches_per_epoch_train * cfg.train.num_epochs
+
     wandb_logger = _build_wandb_logger(cfg, run_name)
     wandb_logger.watch(model, log='all')
     callbacks, checkpoint_callback = _build_callbacks(cfg, run_name)
@@ -456,11 +504,11 @@ def main(cfg: DictConfig) -> float:
     print(f"********** Region: {region_code} **********")
     print(f"********** Universe: {frozen_cfg.data.universe} **********")
 
-    train_loader, valid_loader, test_loader, num_batches_per_epoch_train = _prepare_dataloaders(
+    train_loader, valid_loader, test_loader, num_batches_per_epoch_train, prepares = _prepare_dataloaders(
         frozen_cfg, region_code, universe_prefix
     )
 
-    ric_score = train(frozen_cfg, config_dict, train_loader, valid_loader, num_batches_per_epoch_train, test_loader)
+    ric_score = train(frozen_cfg, config_dict, train_loader, valid_loader, num_batches_per_epoch_train, test_loader, prepares)
     return ric_score
 
 

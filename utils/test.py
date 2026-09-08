@@ -74,6 +74,13 @@ def run_inference(model, data_loader, config, device=None):
     test_index_sorted = test_index.sortlevel(0)[0]
     
     for batch_idx, batch in enumerate(tqdm(data_loader, desc="Running Inference")):
+        hist_codes = hist_len = None
+        if getattr(model, 'transition_aware_routing', False):
+            # TransitionHistoryDataset batches carry (hist_codes, hist_len, data),
+            # bound to dataset position rather than batch order.
+            hist_codes, hist_len, batch = batch
+            hist_codes = hist_codes.to(device)
+            hist_len = hist_len.to(device)
         batch = batch.float()
         batch = batch.to(device)
 
@@ -85,6 +92,10 @@ def run_inference(model, data_loader, config, device=None):
         # wo_prior ablation drops prior_factor.
         if hasattr(model, 'num_prior_factors') and hasattr(model, 'return_predictor') and not model.return_predictor.use_prior:
             y_pred, aux_loss = model(feature)
+        elif getattr(model, 'transition_aware_routing', False):
+            y_pred, beta_p, beta_l, z_q, _ = model(
+                feature, prior_factor, hist_codes, hist_len
+            )
         else:
             y_pred, beta_p, beta_l, z_q, _ = model(feature, prior_factor)
 

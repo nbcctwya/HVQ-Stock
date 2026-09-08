@@ -42,9 +42,17 @@ class DailyBatchSamplerRandom(Sampler):
         return len(self.daily_count) # len(self.data_source)
  
 
-def init_data_loader(handler, shuffle, num_workers=0, index=False):
+def init_data_loader(handler, shuffle, num_workers=0, index=False, history=None):
     # Fail before a training/inference loop starts if a dataset has the wrong layout.
     unpack_batch(handler[0][None])
+    if history is not None:
+        # Bind per-sample (hist_codes, hist_len) to the dataset position so
+        # the identity of every sample's history is independent of batch
+        # order / date shuffling (experiment 024).
+        from module.code_history import TransitionHistoryDataset
+        handler = TransitionHistoryDataset(
+            handler, history["hist_codes"], history["hist_len"]
+        )
     sampler = DailyBatchSamplerRandom(handler, shuffle)
     num_batches_per_epoch = len(sampler)
 
@@ -53,6 +61,11 @@ def init_data_loader(handler, shuffle, num_workers=0, index=False):
         if isinstance(batch, torch.Tensor):
             return batch.float()
         return batch
+
+    if history is not None:
+        def float_collate_fn(batch):  # noqa: F811
+            hist_codes, hist_len, data = default_collate(batch)
+            return hist_codes.long(), hist_len.long(), data.float()
 
     data_loader = DataLoader(handler,
                              batch_sampler=sampler,

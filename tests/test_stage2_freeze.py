@@ -60,6 +60,9 @@ def tiny_config():
             "rank": 0,
             "target_day": 2,
             "use_prior": True,
+            "transition_aware_routing": True,
+            "transition_history_len": 4,
+            "transition_gru_hidden": 64,
             "transformer": {
                 "num_heads": 2,
                 "num_layers": 1,
@@ -84,6 +87,9 @@ class Stage2FreezeTest(unittest.TestCase):
         self.model = build_model()
         self.feature = torch.randn(6, 5, 8)
         self.prior = torch.randn(6, 3)
+        # No valid history: the transition branch must emit a zero bias.
+        self.hist_codes = torch.zeros(6, 4, dtype=torch.long)
+        self.hist_len = torch.zeros(6, dtype=torch.long)
 
     def test_train_call_keeps_frozen_modules_in_eval(self):
         self.model.train()  # what Lightning does at training start
@@ -113,7 +119,7 @@ class Stage2FreezeTest(unittest.TestCase):
         weight_before = self.model.quantizer.embedding.weight.detach().clone()
         embed_prob_before = self.model.quantizer.embed_prob.detach().clone()
         with torch.no_grad():
-            self.model(self.feature, self.prior)
+            self.model(self.feature, self.prior, self.hist_codes, self.hist_len)
         self.assertTrue(torch.equal(weight_before, self.model.quantizer.embedding.weight.detach()))
         self.assertTrue(torch.equal(embed_prob_before, self.model.quantizer.embed_prob))
 
@@ -122,8 +128,8 @@ class Stage2FreezeTest(unittest.TestCase):
         # repeated forwards of the same input give identical z_q.
         self.model.train()
         with torch.no_grad():
-            z_q1 = self.model(self.feature, self.prior)[3]
-            z_q2 = self.model(self.feature, self.prior)[3]
+            z_q1 = self.model(self.feature, self.prior, self.hist_codes, self.hist_len)[3]
+            z_q2 = self.model(self.feature, self.prior, self.hist_codes, self.hist_len)[3]
         self.assertTrue(torch.equal(z_q1, z_q2))
 
 

@@ -93,13 +93,15 @@ class HyperFusion(nn.Module):
         # 5. Alpha head
         self.alpha_head = nn.Linear(hidden_size, 1)
 
-    def forward(self, h, z):
+    def forward(self, h, z, transition_bias=None):
         h_norm = self.norm_h(h)
         z_norm = self.norm_z(z)
 
         x_fused = torch.cat([h_norm, z_norm], dim=-1)
         x_proj = self.input_proj(x_fused)
-        moe_out, moe_loss = self.moe(x=x_proj, z=z_norm)
+        moe_out, moe_loss = self.moe(
+            x=x_proj, z=z_norm, transition_bias=transition_bias
+        )
 
         base_beta_p = self.base_beta_prior_head(h)
         base_beta_l = self.base_beta_latent_head(h)

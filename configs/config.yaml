@@ -92,6 +92,12 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  # Experiment 024: VQ transition-aware routing (the only experiment
+  # variable). L = 5 codes -> at most 4 history codes / 4 transitions;
+  # single-layer GRU with input 128 (frozen codebook dim) and hidden 64.
+  transition_aware_routing: true
+  transition_history_len: 4
+  transition_gru_hidden: 64
   
 train:
   seed: 0 # 
