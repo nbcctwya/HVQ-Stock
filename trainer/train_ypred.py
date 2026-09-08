@@ -60,6 +60,18 @@ class GenerateReturn(pl.LightningModule):
         self.vq_embed_dim  = vqvae_cfg['vq_embed_dim']   # d (VQ / encoder output dim)
         self.seq_len       = vqvae_cfg['seq_len']        # T_window for reconstruction
         self.aux_imp       = config['predictor']['aux_imp']
+        self.decoupling_lambda = float(
+            config['predictor'].get('decoupling_lambda', 0.0)
+        )
+        if self.decoupling_lambda < 0:
+            raise ValueError("decoupling_lambda must be non-negative")
+        if (
+            self.decoupling_lambda > 0
+            and not config['predictor'].get('shared_expert', False)
+        ):
+            raise ValueError(
+                "Shared-Routed decoupling requires predictor.shared_expert=true"
+            )
 
         # Quantizer
         self.decay         = vqvae_cfg['quantizer']['decay']
@@ -171,8 +183,7 @@ class GenerateReturn(pl.LightningModule):
 
         return feature, prior_factor, label
     
-    def forward(self, feature, prior_factor):
-        
+    def _forward_impl(self, feature, prior_factor, return_decoupling_loss=False):
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
@@ -180,7 +191,15 @@ class GenerateReturn(pl.LightningModule):
         z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
+        loading_result = self.loadings(
+            feature,
+            z_q,
+            return_decoupling_loss=return_decoupling_loss,
+        )
+        if return_decoupling_loss:
+            alpha, beta_p, beta_l, loss_imp, decoupling_loss = loading_result
+        else:
+            alpha, beta_p, beta_l, loss_imp = loading_result
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
         f_latent = self.latent_value_head(z_q)
@@ -193,37 +212,63 @@ class GenerateReturn(pl.LightningModule):
             f_latent = f_latent,            # (B,K)
         )
         loss_imp = softcap_log1p(loss_imp, self.aux_imp)
-        return y_pred, beta_p, beta_l, z_q, loss_imp
+        result = (y_pred, beta_p, beta_l, z_q, loss_imp)
+        if return_decoupling_loss:
+            return (*result, decoupling_loss)
+        return result
+
+    def forward(self, feature, prior_factor):
+        """Standard prediction interface; identical to experiment 016."""
+        return self._forward_impl(feature, prior_factor)
+
+    def forward_with_decoupling_loss(self, feature, prior_factor):
+        """Training/validation forward with the independent raw-path penalty."""
+        return self._forward_impl(
+            feature, prior_factor, return_decoupling_loss=True
+        )
+
+    def _total_objective(self, rank_loss, aux_loss, decoupling_loss):
+        return (
+            rank_loss
+            + self.aux_weight * aux_loss
+            + self.decoupling_lambda * decoupling_loss
+        )
 
 
     def training_step(self, batch, batch_idx):
         feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        y_pred, beta_p, beta_l, z_q, aux_loss, decoupling_loss = (
+            self.forward_with_decoupling_loss(feature, prior_factor)
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss
 
-        loss = main_loss + self.aux_weight * aux_loss
+        loss = self._total_objective(main_loss, aux_loss, decoupling_loss)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_mse_loss', mse_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # self.log('train_rank_loss', rank_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+        self.log('train_decoupling_loss', decoupling_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
         feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        y_pred, beta_p, beta_l, z_q, aux_loss, decoupling_loss = (
+            self.forward_with_decoupling_loss(feature, prior_factor)
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss
 
-        loss = main_loss + self.aux_weight * aux_loss
+        loss = self._total_objective(main_loss, aux_loss, decoupling_loss)
 
         self.log('val_loss', loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('val_mse_loss', mse_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         # self.log('val_rank_loss', rank_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('val_aux_loss', aux_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
+        self.log('val_decoupling_loss', decoupling_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         
         daily_ic, daily_ric = calc_ic(y_pred.cpu().numpy(), label.cpu().numpy())
         self.ic.append(daily_ic)

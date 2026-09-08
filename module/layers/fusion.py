@@ -97,17 +97,22 @@ class HyperFusion(nn.Module):
         # 5. Alpha head
         self.alpha_head = nn.Linear(hidden_size, 1)
 
-    def forward(self, h, z):
+    def forward(self, h, z, return_decoupling_loss=False):
         h_norm = self.norm_h(h)
         z_norm = self.norm_z(z)
 
         x_fused = torch.cat([h_norm, z_norm], dim=-1)
         x_proj = self.input_proj(x_fused)
-        moe_out, moe_loss = self.moe(
+        moe_result = self.moe(
             x=x_proj,
             z=z_norm,
             shared_condition=z,
+            return_decoupling_loss=return_decoupling_loss,
         )
+        if return_decoupling_loss:
+            moe_out, moe_loss, decoupling_loss = moe_result
+        else:
+            moe_out, moe_loss = moe_result
 
         base_beta_p = self.base_beta_prior_head(h)
         base_beta_l = self.base_beta_latent_head(h)
@@ -123,4 +128,7 @@ class HyperFusion(nn.Module):
 
         beta_reg_loss = (torch.norm(beta_p, p=2) + torch.norm(beta_l, p=2))
 
-        return alpha, beta_p, beta_l, moe_loss + beta_reg_loss
+        result = (alpha, beta_p, beta_l, moe_loss + beta_reg_loss)
+        if return_decoupling_loss:
+            return (*result, decoupling_loss)
+        return result

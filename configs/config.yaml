@@ -78,6 +78,7 @@ predictor:
   moe_hidden: 64 
   shared_expert: true  # 010: always-on zero-initialized residual expert
   adaptive_shared_fusion: true  # 016: alpha(z_q) scales Shared Expert
+  decoupling_lambda: 0.01  # 018: independent top-level raw-path penalty
   dropout: 0.1
 
   transformer:

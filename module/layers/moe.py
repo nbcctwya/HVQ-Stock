@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 # from module.layers import TemporalEncoder as expert
 # from module.layers.src import router
@@ -331,7 +332,24 @@ class FactorGatedMoE(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
 
-    def forward(self, x, z, loss_coef=1, shared_condition=None): #1e-2):
+    @staticmethod
+    def shared_routed_decoupling_loss(shared_out, routed_out, eps=1e-8):
+        """Return mean squared per-sample cosine similarity for raw paths."""
+        if shared_out.shape != routed_out.shape:
+            raise ValueError("shared_out and routed_out must have identical shapes")
+        cosine = F.cosine_similarity(
+            shared_out.float(), routed_out.float(), dim=-1, eps=eps
+        )
+        return cosine.square().mean()
+
+    def forward(
+        self,
+        x,
+        z,
+        loss_coef=1,
+        shared_condition=None,
+        return_decoupling_loss=False,
+    ): #1e-2):
         """Args:
         x: tensor shape [batch_size, input_size]
         train: a boolean scalar.
@@ -360,7 +378,8 @@ class FactorGatedMoE(nn.Module):
         routed_out = dispatcher.combine(expert_outputs)
 
         if self.shared_expert is not None:
-            shared_out = self.shared_expert(x)
+            raw_shared_out = self.shared_expert(x)
+            shared_out = raw_shared_out
             if self.shared_fusion is not None:
                 if shared_condition is None:
                     shared_condition = z
@@ -371,6 +390,16 @@ class FactorGatedMoE(nn.Module):
             y = shared_out + routed_out
         else:
             y = routed_out
+
+        if return_decoupling_loss:
+            if self.shared_expert is None:
+                raise RuntimeError(
+                    "Shared-Routed decoupling requires use_shared_expert=True"
+                )
+            decoupling_loss = self.shared_routed_decoupling_loss(
+                raw_shared_out, routed_out
+            )
+            return y, loss, decoupling_loss
 
         return y, loss
     

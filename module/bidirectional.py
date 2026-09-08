@@ -59,7 +59,7 @@ class LoadingGenerator(nn.Module):
             ),
         )
 
-    def forward(self, feature, z_q):
+    def forward(self, feature, z_q, return_decoupling_loss=False):
         """
         Args:
             feature: (B, T, 158)
@@ -77,6 +77,14 @@ class LoadingGenerator(nn.Module):
         temp_feature = self.temporal_transformer(dlinear_out, z_q) # (B, pred_len, d_model) -> (B, pred_len, d_model)
 
         # ---- 2. Advanced MoE with Cross-Attention ----
-        alpha, beta_p, beta_l, total_moe_loss = self.fusion(h=temp_feature, z=z_q) # (B, T, d_model), (B,64) -> outputs
+        fusion_result = self.fusion(
+            h=temp_feature,
+            z=z_q,
+            return_decoupling_loss=return_decoupling_loss,
+        ) # (B, T, d_model), (B,64) -> outputs
 
-        return alpha, beta_p, beta_l, total_moe_loss
+        if return_decoupling_loss:
+            alpha, beta_p, beta_l, total_moe_loss, decoupling_loss = fusion_result
+            return alpha, beta_p, beta_l, total_moe_loss, decoupling_loss
+
+        return fusion_result
