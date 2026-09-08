@@ -91,6 +91,7 @@ predictor:
   rank : 0
   target_day: 5
   use_prior: True
+  latent_conditioned_allocation: True
   aux_imp: 3
   
 train:

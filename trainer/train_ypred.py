@@ -144,6 +144,19 @@ class GenerateReturn(pl.LightningModule):
         self.rank_loss = RankLoss(alpha=self.rank)
         self.listNet_loss = ListNetLoss(temperature=1.0)
 
+        # Experiment 021: append the only new trainable module after every
+        # baseline module has been constructed.  This prevents its Linear
+        # constructor from changing any existing parameter initialization for
+        # a fixed seed.  The explicit zero initialization makes the complete
+        # initial prediction forward identical to the baseline.
+        self.use_latent_conditioned_allocation = config['predictor'].get(
+            'latent_conditioned_allocation', False
+        )
+        if self.use_latent_conditioned_allocation:
+            self.return_predictor.enable_latent_conditioned_allocation(
+                self.vq_embed_dim
+            )
+
     def configure_optimizers(self):
         optimizer  = torch.optim.AdamW(self.parameters(), lr=self.config['train']['learning_rate'], weight_decay=1e-5)
         # Linear warm-up over the first 5% of total steps, then cosine decay.
@@ -191,6 +204,7 @@ class GenerateReturn(pl.LightningModule):
             beta_l   = beta_l,              # soft weights?
             f_prior  = prior_factor_normed, # (B,P)
             f_latent = f_latent,            # (B,K)
+            z_q      = z_q,                  # frozen Stage 1 raw latent
         )
         loss_imp = softcap_log1p(loss_imp, self.aux_imp)
         return y_pred, beta_p, beta_l, z_q, loss_imp
@@ -337,21 +351,53 @@ class GenerateReturn(pl.LightningModule):
         self.revin.eval()
 
 class ReturnPredictor(nn.Module):
+    ALLOCATION_DELTA = 0.5
+
     def __init__(self, num_prior, num_latent, use_prior=True):
         super().__init__()
         self.num_prior = num_prior
         self.num_latent = num_latent
         self.use_prior = use_prior
-        
-    def forward(self, alpha, beta_p, beta_l, f_prior, f_latent):
+
+    def enable_latent_conditioned_allocation(self, latent_dim):
+        """Add the experiment's zero-initialized ``Linear(latent_dim, 1)``."""
+        if hasattr(self, 'allocation_gate'):
+            raise RuntimeError("latent-conditioned allocation is already enabled")
+        self.allocation_gate = nn.Linear(latent_dim, 1)
+        nn.init.zeros_(self.allocation_gate.weight)
+        nn.init.zeros_(self.allocation_gate.bias)
+
+    def allocation_scales(self, z_q):
+        """Return complementary prior/latent scales conditioned on raw z_q."""
+        if not hasattr(self, 'allocation_gate'):
+            ones = torch.ones(z_q.shape[0], dtype=z_q.dtype, device=z_q.device)
+            return ones, ones
+        gate = self.ALLOCATION_DELTA * torch.tanh(
+            self.allocation_gate(z_q).squeeze(-1)
+        )
+        return 1.0 + gate, 1.0 - gate
+
+    def forward(self, alpha, beta_p, beta_l, f_prior, f_latent, z_q=None):
         prior_term = (beta_p * f_prior).sum(dim=1)
         latent_term = (beta_l * f_latent).sum(dim=1)  # elementwise (B, K)
 
         combined = torch.cat([prior_term.unsqueeze(1), latent_term.unsqueeze(1)], dim=1)
         # intercept_term = self.final_layer(combined).squeeze(-1)
         
-        if self.use_prior:  
-            output = alpha + prior_term + latent_term # + intercept_term
+        if self.use_prior:
+            if hasattr(self, 'allocation_gate'):
+                if z_q is None:
+                    raise ValueError(
+                        "z_q is required for latent-conditioned allocation"
+                    )
+                prior_scale, latent_scale = self.allocation_scales(z_q)
+                output = (
+                    alpha
+                    + prior_scale * prior_term
+                    + latent_scale * latent_term
+                )
+            else:
+                output = alpha + prior_term + latent_term # + intercept_term
         else:
             output = alpha + latent_term
 
