@@ -166,7 +166,7 @@ experiments:
     base: exp/016-latent-adaptive-shared-fusion
     branch: exp/018-adaptive-shared-decoupling
     commit: 8756e8b6be4f0ca00b4e151198b1915e10c6bb65
-    status: pending
+    status: running
     stage1_source: "010"
   - id: "019"
     name: quantization-confidence-adapter
