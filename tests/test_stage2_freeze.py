@@ -60,6 +60,7 @@ def tiny_config():
             "rank": 0,
             "target_day": 2,
             "use_prior": True,
+            "code_aware_routing": True,
             "transformer": {
                 "num_heads": 2,
                 "num_layers": 1,

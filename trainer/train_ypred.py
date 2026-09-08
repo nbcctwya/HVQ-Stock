@@ -60,6 +60,9 @@ class GenerateReturn(pl.LightningModule):
         self.vq_embed_dim  = vqvae_cfg['vq_embed_dim']   # d (VQ / encoder output dim)
         self.seq_len       = vqvae_cfg['seq_len']        # T_window for reconstruction
         self.aux_imp       = config['predictor']['aux_imp']
+        self.code_aware_routing = config['predictor'].get(
+            'code_aware_routing', False
+        )
 
         # Quantizer
         self.decay         = vqvae_cfg['quantizer']['decay']
@@ -180,7 +183,17 @@ class GenerateReturn(pl.LightningModule):
         z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
+        routing_vq_idx = None
+        if self.code_aware_routing:
+            # vq_idx comes from the frozen Stage 1 quantizer; it is only used
+            # as a discrete index into the code-bias routing table and must
+            # stay within [0, K-1].
+            check_vq_idx(vq_idx, self.num_embed)
+            routing_vq_idx = vq_idx.detach().long()
+
+        alpha, beta_p, beta_l, loss_imp = self.loadings(
+            feature, z_q, vq_idx=routing_vq_idx
+        )
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
         f_latent = self.latent_value_head(z_q)

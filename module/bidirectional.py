@@ -53,13 +53,19 @@ class LoadingGenerator(nn.Module):
             moe_k=config['predictor']['k'],
             hidden_size=config['predictor']['moe_hidden'],
             drop=config['predictor']['dropout'],
+            code_aware_routing=config['predictor'].get(
+                'code_aware_routing', False
+            ),
+            num_codes=config['vqvae']['num_embed'],
         )
 
-    def forward(self, feature, z_q):
+    def forward(self, feature, z_q, vq_idx=None):
         """
         Args:
             feature: (B, T, 158)
             z_q: (B, vq_dim) # (B, 64)
+            vq_idx: (B,) discrete VQ code ids (only used when the experiment's
+                code-aware routing is enabled)
         Returns:
             alpha: (B,) # mixing coefficient
             beta_p: (B, num_prior_factors) # prior factors
@@ -73,6 +79,8 @@ class LoadingGenerator(nn.Module):
         temp_feature = self.temporal_transformer(dlinear_out, z_q) # (B, pred_len, d_model) -> (B, pred_len, d_model)
 
         # ---- 2. Advanced MoE with Cross-Attention ----
-        alpha, beta_p, beta_l, total_moe_loss = self.fusion(h=temp_feature, z=z_q) # (B, T, d_model), (B,64) -> outputs
+        alpha, beta_p, beta_l, total_moe_loss = self.fusion(
+            h=temp_feature, z=z_q, vq_idx=vq_idx
+        ) # (B, T, d_model), (B,64) -> outputs
 
         return alpha, beta_p, beta_l, total_moe_loss

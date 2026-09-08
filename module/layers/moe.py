@@ -156,6 +156,8 @@ class FactorGatedMoE(nn.Module):
                  num_experts: int = 4, 
                  noisy_gating: bool = True,  
                  k=2,
+                 code_aware_routing: bool = False,
+                 num_codes: int = None,
                  ):
         super(FactorGatedMoE, self).__init__()
         self.gate_input_size = gate_input_size
@@ -164,6 +166,7 @@ class FactorGatedMoE(nn.Module):
         self.num_experts = num_experts
         self.noisy_gating = noisy_gating
         self.k = k
+        self.code_aware_routing = code_aware_routing
         
         self.experts = nn.ModuleList([
             SimpleMLP(expert_input_size, expert_input_size, hidden_size) 
@@ -183,6 +186,22 @@ class FactorGatedMoE(nn.Module):
             nn.GELU(), 
             nn.Linear(hidden_size, num_experts)
         )
+
+        if self.code_aware_routing:
+            # Explicit code-aware routing bias B in R^(K x n_expert): an
+            # additive, per-VQ-code expert preference table on the clean
+            # routing logits. torch.zeros consumes no RNG state, so the
+            # initialization of every pre-existing baseline parameter is
+            # bitwise unaffected by this new table.
+            if not isinstance(num_codes, int) or num_codes <= 0:
+                raise ValueError(
+                    f"num_codes (VQ codebook size) must be a positive int, got {num_codes}"
+                )
+            self.num_codes = num_codes
+            self.code_bias = nn.Parameter(torch.zeros(num_codes, num_experts))
+        else:
+            self.num_codes = None
+            self.code_bias = None
 
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
@@ -252,7 +271,33 @@ class FactorGatedMoE(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
+    def clean_routing_logits(self, x, vq_idx=None):
+        """Original router logits plus the optional per-code additive bias."""
+        clean_logits = self.gate(x)
+        if not self.code_aware_routing:
+            return clean_logits
+        if vq_idx is None:
+            raise ValueError("vq_idx is required for code-aware routing")
+        if not vq_idx.dtype in (torch.int8, torch.int16, torch.int32, torch.int64,
+                                torch.uint8):
+            raise TypeError(
+                f"vq_idx must be an integer tensor of discrete code ids, got {vq_idx.dtype}"
+            )
+        if vq_idx.ndim != 1 or vq_idx.shape[0] != x.shape[0]:
+            raise ValueError(
+                f"vq_idx must have shape [batch_size]={x.shape[0]}, got {tuple(vq_idx.shape)}"
+            )
+        # Discrete index only: detached and cast to long so this path can
+        # never backpropagate into the frozen Stage 1 quantizer.
+        vq_idx = vq_idx.detach().long()
+        if torch.any(vq_idx >= self.num_codes) or torch.any(vq_idx < 0):
+            bad = vq_idx[(vq_idx >= self.num_codes) | (vq_idx < 0)]
+            raise ValueError(
+                f"vq_idx out of range [0, {self.num_codes - 1}]: {bad.tolist()}"
+            )
+        return clean_logits + self.code_bias[vq_idx]
+
+    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2, vq_idx=None):
         """Noisy top-k gating.
         See paper: https://arxiv.org/abs/1701.06538.
         Args:
@@ -263,7 +308,7 @@ class FactorGatedMoE(nn.Module):
           gates: a Tensor with shape [batch_size, num_experts]
           load: a Tensor with shape [num_experts]
         """
-        clean_logits = self.gate(x)
+        clean_logits = self.clean_routing_logits(x, vq_idx)
 
         if self.noisy_gating and train:
             raw_noise_stddev = self.noise(x)
@@ -296,7 +341,7 @@ class FactorGatedMoE(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
 
-    def forward(self, x, z, loss_coef=1): #1e-2):
+    def forward(self, x, z, loss_coef=1, vq_idx=None): #1e-2):
         """Args:
         x: tensor shape [batch_size, input_size]
         train: a boolean scalar.
@@ -308,7 +353,7 @@ class FactorGatedMoE(nn.Module):
         training loss of the model.  The backpropagation of this loss
         encourages all experts to be approximately equally used across a batch.
         """
-        gates, load = self.noisy_top_k_gating(z, self.training)
+        gates, load = self.noisy_top_k_gating(z, self.training, vq_idx=vq_idx)
         # calculate importance loss
         importance = gates.sum(0)
         loss = self.cv_squared(importance) + self.cv_squared(load)

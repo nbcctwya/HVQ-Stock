@@ -1,159 +1,93 @@
-# Vector-Quantized Discrete Latent Factors Meet Financial Priors: Dynamic Cross-Sectional Stock Ranking Prediction for Portfolio Construction
+# Experiment 022 — Explicit Code-Aware Routing
 
-<div align="center">
+## Base
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-red.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status](https://img.shields.io/badge/Status-Accepted-brightgreen.svg)](https://github.com)
+This experiment is based directly on `main`, the corrected original PRISM-VQ
+baseline. It changes only the Stage 2 MoE clean routing logits and reuses the
+external corrected PRISM-VQ Stage 1 checkpoint.
 
-</div>
+## Idea / Motivation
 
-This repository contains the implementation of **PRISM-VQ** (PRior-Informed Stock Model with Vector Quantization), a unified dynamic factor model for stock return prediction.
+In the baseline, the MoE router infers expert preference purely from the
+continuous quantized embedding:
 
-## Canonical dataset on main
-
-HVQ main has one dataset schema: **158 stock + 13 prior + 63 market +
-10 future returns = 244 dimensions**, for **CSI300 and SP500 only**. Data is
-built directly from Qlib and raw JKP factor CSVs; no pre-existing dataset
-pickle is needed. Other batch widths fail explicitly.
-
-CSI300 uses CN market63 (`sh000300`, `sh000852`, `sh000905`); SP500 uses US
-market63 (`^gspc`, `^dji`, `^ndx`). Market remains an independent group,
-separate from the 158 stock features. The current baseline parses it but does
-not use it; later experiments may study market-aware mechanisms.
-
-Experiments **001–006** are frozen. Reproduce their historical data/model
-conventions by checking out the corresponding branch and regenerating its
-own data; they are outside main's current dataset specification.
-
-See [dataset/README.md](dataset/README.md) for generation, naming, parsing,
-and dataset smoke checks without training.
-
-## Baseline Results Protocol v1.0
-
-The repository includes a non-invasive adapter that evaluates the existing
-CSI300 and S&P 500 seed predictions under a common Qlib protocol.  It does not
-replace training or the project's native backtest outputs.  Generate and
-validate the comparable artifacts with:
-
-```bash
-conda run -n prism-vq python generate_baseline_results.py --out results
-conda run -n prism-vq python inspect_eval_results.py --out results
-conda run -n prism-vq python -m unittest -v tests/test_protocol_metrics.py
+```text
+clean_logits = Router(z_q)
 ```
 
-`results/metrics/` contains numeric seed, aggregate, and independently
-re-backtested ensemble metrics.  `results/tables/` contains four-decimal
-display tables only, `results/curves/ensemble/` contains daily gross return,
-cost, net return, benchmark return, and NAV series, and `results/metadata/`
-records the discovered data split and complete evaluation convention.
-`results/diagnostics/validation.json` is the machine-readable validation
-report.  No extra cache or artifact directory is written inside `results/`;
-the validator reconstructs the ensemble score from the seed predictions when
-needed.
+Although `z_q` already encodes the continuous representation of the matched
+prototype, the discrete VQ code identity itself may carry a stable
+expert-specialization prior. Experiment 022 explicitly learns an additive
+routing bias `P(expert | code_id)`, so that distinct discrete latent states
+can build stable expert preferences instead of relying on the continuous
+router to re-infer them from `z_q` every time.
 
-Prediction metrics are daily cross-sectional Pearson IC and Spearman RankIC;
-their IR values use daily sample standard deviation (`ddof=1`) without annual
-scaling.  Portfolio metrics use `log1p(gross_return - cost)`, 252 trading days,
-sample standard deviation, zero risk-free rate, and zero daily MAR.  The
-protocol backtest uses Qlib `TopkDropoutStrategy` with TopK=30, DropN=5 and the
-full fixed configuration recorded in `results/metadata/eval_config.json`.
+## Core Modification
 
-📄 **Paper**: Accepted at IJCAI-ECAI 2026
+A code-specific expert preference table is added to `FactorGatedMoE`:
 
----
-
-## 📋 Abstract
-
-Stock return prediction presents several unique challenges that motivate our architectural design. Financial time series exhibit extremely low signal-to-noise ratios, with predictable components often masked by market microstructure noise and idiosyncratic shocks. Additionally, stocks do not evolve independently—their returns exhibit complex cross-sectional dependencies driven by industry relationships, supply chain connections, and correlated investor behavior. Market regimes shift over time, requiring models to adapt factor loadings dynamically rather than assuming stationarity. Finally, practitioners require interpretable models that align with financial theory, as black-box predictions are difficult to validate and deploy in regulated environments.
-
-<div align="center">
-  <img src="images/detailed-prism.png" alt="PRISM-VQ Architecture" width="100%"/>
-  <p><em>Architecture of PRISM-VQ. The spatial learning stage (left) learns discrete stock representations via vector quantization over cross-sectional features. The temporal learning stage (right) uses these discrete codes to gate expert networks, generating dynamic factor loadings that fuse expert prior factors and learned latent factors for return prediction.</em></p>
-</div>
-
-## 🎯 Key Contributions
-
-- **Unified Framework**: We propose PRISM-VQ, a unified dynamic factor model that systematically integrates expert prior factors, data-driven discrete latent factors, and adaptive temporal modeling. To our knowledge, this is the first framework to combine these three components within a principled factor model structure.
-
-- **Vector Quantization**: We introduce vector quantization as an inductive bias for learning robust cross-sectional factors in financial markets. We demonstrate that discrete representations provide superior regularization compared to continuous alternatives in low signal-to-noise environments.
-
-## 🚀 Installation
-
-### 📦 Requirements
-
-```
-Python 3.11
-PyTorch 2.4.1
-Qlib 0.9.6.99
-Hydra & OmegaConf
+```text
+B ∈ R^(K x n_expert),  K = vqvae.num_embed = 512
+code_bias = B[vq_idx]
+clean_logits = Router(z_q) + code_bias
 ```
 
-### 🔧 Setup
+- `B` (`loadings.fusion.moe.code_bias`) is an `nn.Parameter` of shape
+  `[vqvae.num_embed, predictor.n_expert]` — `[512, 2]` under the default
+  config — explicitly initialized to all zeros. `torch.zeros` consumes no RNG
+  state, so for the same seed every pre-existing baseline parameter is
+  bitwise identical to `main`.
+- The frozen Stage 1 quantizer already returns `vq_idx`; it is validated to
+  lie in `[0, K-1]`, detached, cast to a long discrete index, and passed
+  `GenerateReturn.forward -> LoadingGenerator -> HyperFusion ->
+  FactorGatedMoE.noisy_top_k_gating`, where it only indexes `B` and the
+  selected row is added to the clean routing logits.
+- Everything downstream is untouched: the original router, noise network,
+  `W_h`, top-k, softmax, `SparseDispatcher`, and the load-balancing loss keep
+  their baseline definitions and weights. With zero-init, clean logits,
+  routing, the original auxiliary loss, and the complete prediction forward
+  are bitwise identical to the baseline.
 
-```bash
-# Clone the repository
-git clone https://github.com/x7jeon8gi/PRISM-VQ.git
-cd PRISM-VQ
+The default `configs/config.yaml` enables the experiment with
+`predictor.code_aware_routing: true`; no experiment-specific CLI override is
+required.
 
-# Install dependencies
-pip install -r requirements.txt
+## Difference from Base
+
+The sole experimental variable is the additive code-ID-specific routing bias
+on the MoE clean logits. The bias does not enter expert inputs, the Temporal
+Transformer, HyperFusion projections, factor heads, `LatentValueHead`,
+`ReturnPredictor`, or any other prediction path, and it cannot backpropagate
+into Stage 1. Quantizer assignment, codebook, Stage 1 loss and training
+logic, data splits, training budget, seed protocol, metrics, and backtest
+protocol are all unchanged. Encoder, Quantizer, RevIN, and codebook remain
+frozen and receive no gradient. No shared expert, adaptive fusion,
+decoupling, quantization confidence, market-conditioned routing, or
+prior-latent allocation mechanism is introduced.
+
+Stage 1 provenance:
+
+```text
+external
+artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
 ```
 
-## 📊 Data Preparation
+This is the corrected PRISM-VQ exact single-VQ512, 128-dimensional Stage 1
+checkpoint trained with the fixed Stage 1 seed 42.
 
-The model uses two data sources:
+## Smoke Status
 
-1. **Qlib Data**: Stock market data from Qlib's data repository
-2. **JKP Global Factors**: Jensen, Kelly, and Pedersen (JKP) global factor data
+PASS. The full unit suite and the minimal synthetic Stage 2 smoke validate
+`vq_idx` pass-through from the quantizer to the MoE router, `[512, n_expert]`
+zero-initialized table shape, zero-init bitwise equivalence of clean
+logits/routing/auxiliary loss/full forward with the baseline, bitwise
+initialization isolation of all pre-existing parameters, unchanged noisy
+top-k/noise/`W_h`/dispatcher/load-balancing behavior, distinct routing
+preferences for distinct code ids under a non-zero bias, finite non-zero
+code-bias gradients and updates, loud errors on invalid code ids, isolation
+of the code id to the routing path, strict external Stage 1 loading and
+freezing, strict Stage 2 checkpoint round-trip, standard inference/metrics,
+and backtest input normalization. Smoke artifacts are isolated under
+`artifacts/022/smoke/`.
 
-
-## 🏋️ Training
-
-The model training consists of two stages:
-
-### Stage 1: VQ-VAE Training
-```bash
-python stage1.py
-```
-
-### Stage 2: Predictive Model Training
-```bash
-python stage2.py
-```
-
-### ⚙️ Configuration
-
-All model configurations are managed through Hydra configuration files located in `configs/`. Key parameters include:
-
-- `data.universe`: Choose between 'sp500' or 'csi300'
-- `vqvae.num_embed`: Number of codebook entries
-- `predictor.n_expert`: Number of experts in MoE
-- `stage2_presets`: Market-specific Stage 2 defaults for checkpoint, auxiliary weight, MoE experts, and attention heads. `stage2.py` applies these automatically from `data.universe`.
-
-
-## 📁 Project Structure
-
-```
-PRISM-VQ/
-├── 📂 configs/           # Hydra configuration files
-├── 📂 dataset/           # Data loading and processing
-├── 📂 module/            # Model architecture components
-│   ├── 📄 autoencoder.py
-│   ├── 📄 quantise.py
-│   └── 📂 layers/
-├── 📂 trainer/           # Training scripts
-├── 📂 utils/             # Utility functions
-├── 🚀 stage1.py          # Stage 1 training entry point
-└── 🚀 stage2.py          # Stage 2 training entry point
-```
-
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-We thank the Qlib team for providing the financial data infrastructure and the authors of the JKP factors for making their data publicly available. We also acknowledge the [CVQ-VAE](https://github.com/lyndonzheng/CVQ-VAE) project for inspiration on vector quantization techniques.
+No formal long-running training or portfolio backtest is performed in Phase 1.
