@@ -154,3 +154,10 @@ experiments:
     commit: f0157c7c23cbf7c4749ace313c10b21354e307ba
     status: pending
     stage1_source: "010"
+  - id: "017"
+    name: shared-routed-decoupling
+    base: exp/010-prism-shared-routed-moe
+    branch: exp/017-shared-routed-decoupling
+    commit: c82f2f6ec9248835037f8c956772fe58da2d5abe
+    status: pending
+    stage1_source: "010"
