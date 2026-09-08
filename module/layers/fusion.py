@@ -60,7 +60,8 @@ class HyperFusion(nn.Module):
                  num_experts: int = 4,
                  moe_k: int = 1,
                  hidden_size: int = 64,
-                 use_shared_expert: bool = False):
+                 use_shared_expert: bool = False,
+                 use_adaptive_shared_fusion: bool = False):
         super().__init__()
 
         # 1. Input projection
@@ -82,6 +83,7 @@ class HyperFusion(nn.Module):
             num_experts=num_experts,
             k=moe_k,
             use_shared_expert=use_shared_expert,
+            use_adaptive_shared_fusion=use_adaptive_shared_fusion,
         )
 
         # 3. Base beta heads (from h)
@@ -101,7 +103,11 @@ class HyperFusion(nn.Module):
 
         x_fused = torch.cat([h_norm, z_norm], dim=-1)
         x_proj = self.input_proj(x_fused)
-        moe_out, moe_loss = self.moe(x=x_proj, z=z_norm)
+        moe_out, moe_loss = self.moe(
+            x=x_proj,
+            z=z_norm,
+            shared_condition=z,
+        )
 
         base_beta_p = self.base_beta_prior_head(h)
         base_beta_l = self.base_beta_latent_head(h)

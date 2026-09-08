@@ -157,6 +157,7 @@ class FactorGatedMoE(nn.Module):
                  noisy_gating: bool = True,  
                  k=2,
                  use_shared_expert: bool = False,
+                 use_adaptive_shared_fusion: bool = False,
                  ):
         super(FactorGatedMoE, self).__init__()
         self.gate_input_size = gate_input_size
@@ -166,6 +167,13 @@ class FactorGatedMoE(nn.Module):
         self.noisy_gating = noisy_gating
         self.k = k
         self.use_shared_expert = use_shared_expert
+        self.use_adaptive_shared_fusion = use_adaptive_shared_fusion
+        self.shared_fusion_delta = 0.5
+
+        if self.use_adaptive_shared_fusion and not self.use_shared_expert:
+            raise ValueError(
+                "adaptive shared fusion requires use_shared_expert=True"
+            )
         
         self.experts = nn.ModuleList([
             SimpleMLP(expert_input_size, expert_input_size, hidden_size) 
@@ -204,6 +212,18 @@ class FactorGatedMoE(nn.Module):
             nn.init.zeros_(final_linear.bias)
         else:
             self.shared_expert = None
+
+        # A single affine map is sufficient to make the shared contribution
+        # latent-conditioned. Construct it without advancing the global RNG so
+        # every parameter inherited from experiment 010 (including modules
+        # instantiated after this MoE) retains identical seeded initialization.
+        if self.use_adaptive_shared_fusion:
+            with torch.random.fork_rng(devices=[]):
+                self.shared_fusion = nn.Linear(gate_input_size, 1)
+            nn.init.zeros_(self.shared_fusion.weight)
+            nn.init.zeros_(self.shared_fusion.bias)
+        else:
+            self.shared_fusion = None
 
     def cv_squared(self, x):
         """The squared coefficient of variation of a sample.
@@ -311,7 +331,7 @@ class FactorGatedMoE(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
 
-    def forward(self, x, z, loss_coef=1): #1e-2):
+    def forward(self, x, z, loss_coef=1, shared_condition=None): #1e-2):
         """Args:
         x: tensor shape [batch_size, input_size]
         train: a boolean scalar.
@@ -341,6 +361,13 @@ class FactorGatedMoE(nn.Module):
 
         if self.shared_expert is not None:
             shared_out = self.shared_expert(x)
+            if self.shared_fusion is not None:
+                if shared_condition is None:
+                    shared_condition = z
+                shared_scale = 1.0 + self.shared_fusion_delta * torch.tanh(
+                    self.shared_fusion(shared_condition)
+                )
+                shared_out = shared_scale * shared_out
             y = shared_out + routed_out
         else:
             y = routed_out

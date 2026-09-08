@@ -77,6 +77,7 @@ predictor:
   pred_len: 20  
   moe_hidden: 64 
   shared_expert: true  # 010: always-on zero-initialized residual expert
+  adaptive_shared_fusion: true  # 016: alpha(z_q) scales Shared Expert
   dropout: 0.1
 
   transformer:
