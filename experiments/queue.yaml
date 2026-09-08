@@ -228,3 +228,15 @@ experiments:
     # artifacts/ is gitignored, so a plain clone must restore it explicitly.
     # Missing/empty files fail loudly and never trigger Stage 1 self-training.
     stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
+  - id: "024"
+    name: vq-transition-aware-routing
+    base: main
+    branch: exp/024-vq-transition-aware-routing
+    commit: da989e74400b2ebed792f79efda285d329432514
+    status: pending
+    stage1_source: external
+    # Corrected PRISM-VQ baseline exact Stage 1 (single VQ512, seed 42).
+    # This local artifact is byte-identical to the original PRISM-VQ file;
+    # artifacts/ is gitignored, so a plain clone must restore it explicitly.
+    # Missing/empty files fail loudly and never trigger Stage 1 self-training.
+    stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
