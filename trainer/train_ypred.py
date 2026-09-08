@@ -144,6 +144,18 @@ class GenerateReturn(pl.LightningModule):
         self.rank_loss = RankLoss(alpha=self.rank)
         self.listNet_loss = ListNetLoss(temperature=1.0)
 
+        # Experiment 023: append the only new trainable module after every
+        # baseline module has been constructed.  This preserves all existing
+        # parameter initializations for a fixed seed.  Explicit zero init makes
+        # the initial Stage 2 latent exactly equal to the hard-quantized latent.
+        self.use_residual_correction_adapter = config['predictor'].get(
+            'residual_correction_adapter', False
+        )
+        if self.use_residual_correction_adapter:
+            self.residual_correction_adapter = nn.Linear(self.vq_embed_dim, self.vq_embed_dim)
+            nn.init.zeros_(self.residual_correction_adapter.weight)
+            nn.init.zeros_(self.residual_correction_adapter.bias)
+
     def configure_optimizers(self):
         optimizer  = torch.optim.AdamW(self.parameters(), lr=self.config['train']['learning_rate'], weight_decay=1e-5)
         # Linear warm-up over the first 5% of total steps, then cosine decay.
@@ -170,20 +182,33 @@ class GenerateReturn(pl.LightningModule):
         label = parts.target(self.target_index + 1)
 
         return feature, prior_factor, label
-    
+
+    @staticmethod
+    def quantization_residual(h_batch, z_q):
+        """Instance-specific continuous residual, detached from frozen Stage 1."""
+        return h_batch.detach() - z_q.detach()
+
+    def build_stage2_latent(self, h_batch, z_q):
+        """Build the sole latent consumed by all Stage 2 modules."""
+        z_q = z_q.detach()
+        if not self.use_residual_correction_adapter:
+            return z_q
+        residual = self.quantization_residual(h_batch, z_q)
+        return z_q + self.residual_correction_adapter(residual)
+
     def forward(self, feature, prior_factor):
-        
+
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
         z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
-        z_q = z_q.detach()
+        z_stage2 = self.build_stage2_latent(h_batch, z_q)
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
+        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_stage2)
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
-        f_latent = self.latent_value_head(z_q)
+        f_latent = self.latent_value_head(z_stage2)
 
         y_pred = self.return_predictor(
             alpha    = alpha,
@@ -193,7 +218,7 @@ class GenerateReturn(pl.LightningModule):
             f_latent = f_latent,            # (B,K)
         )
         loss_imp = softcap_log1p(loss_imp, self.aux_imp)
-        return y_pred, beta_p, beta_l, z_q, loss_imp
+        return y_pred, beta_p, beta_l, z_stage2, loss_imp
 
 
     def training_step(self, batch, batch_idx):
