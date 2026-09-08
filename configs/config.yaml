@@ -92,6 +92,7 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  quantization_confidence_adapter: true
   
 train:
   seed: 0 # 
