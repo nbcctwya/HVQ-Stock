@@ -93,18 +93,22 @@ Notes:
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0335
+ICIR: 0.1809
+RankIC: 0.0528
+RankICIR: 0.2778
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 13.31%（基准 6.40%，超额 6.91%）
+Sharpe: 0.8651
+Sortino: 1.2749
+MDD: -13.94%
+Calmar: 0.9550
+Turnover: 0.3220
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 2118eaa3696c21d27e695082f47f8ced2d0c3758）。Stage 1 复用外部 exact checkpoint：`/home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt`（本实验未重新训练 Stage 1）；Stage 2 seed 0。
+
+产物：`artifacts/020/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。

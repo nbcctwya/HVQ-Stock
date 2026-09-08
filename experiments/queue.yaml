@@ -185,7 +185,7 @@ experiments:
     base: main
     branch: exp/020-market-conditioned-routing
     commit: 2118eaa3696c21d27e695082f47f8ced2d0c3758
-    status: running
+    status: done
     stage1_source: external
     # Corrected PRISM-VQ baseline exact Stage 1 (single VQ512, seed 42).
     # This local artifact is byte-identical to the original PRISM-VQ file;
