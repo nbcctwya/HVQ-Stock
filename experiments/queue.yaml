@@ -161,3 +161,10 @@ experiments:
     commit: c82f2f6ec9248835037f8c956772fe58da2d5abe
     status: pending
     stage1_source: "010"
+  - id: "018"
+    name: adaptive-shared-decoupling
+    base: exp/016-latent-adaptive-shared-fusion
+    branch: exp/018-adaptive-shared-decoupling
+    commit: 8756e8b6be4f0ca00b4e151198b1915e10c6bb65
+    status: pending
+    stage1_source: "010"
