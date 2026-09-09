@@ -281,3 +281,10 @@ experiments:
     commit: 8b61fc866b36d1776153c02dc418336c824c07c2
     status: pending
     stage1_source: self
+  - id: "030"
+    name: prism-mean-pooling-stage1-encoder
+    base: exp/027-prism-master-stage1-encoder
+    branch: exp/030-prism-mean-pooling-stage1-encoder
+    commit: 63104603553afc51304a5695fbf60dd3931b43ec
+    status: pending
+    stage1_source: self
