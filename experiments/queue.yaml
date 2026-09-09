@@ -245,7 +245,7 @@ experiments:
     base: exp/010-prism-shared-routed-moe
     branch: exp/025-combine-010-019-shared-routed-quant-confidence
     commit: 5650e9fc9f3cf0ba89ac5e08b0965cc041ef4a2f
-    status: running
+    status: failed
     # Stage 2-only experiment on top of 010: reuse 010's formal Stage 1
     # (artifacts/010/run/.stage1.done -> the corrected PRISM-VQ external exact
     # checkpoint, single VQ512, seed 42).
