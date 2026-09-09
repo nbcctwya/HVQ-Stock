@@ -255,7 +255,7 @@ experiments:
     base: exp/010-prism-shared-routed-moe
     branch: exp/026-combine-010-020-shared-routed-market-routing
     commit: e696ef06db0d87aab5064004c911ddf26998f3a9
-    status: running
+    status: done
     # Stage 2-only experiment on top of 010: reuse 010's formal Stage 1
     # (artifacts/010/run/.stage1.done -> the corrected PRISM-VQ external exact
     # checkpoint, single VQ512, seed 42).
