@@ -31,10 +31,12 @@ class FactorVQVAE(pl.LightningModule):
         sch_config = {"scheduler": scheduler, "interval": "step", "frequency": 1}
         return [optimizer], [sch_config]
     
-    def forward(self, feature, prior_factor, future_returns):
+    def forward(self, feature, prior_factor, market_feature, future_returns):
 
         recon_loss, vq_loss, pred_loss, total_loss, z_q,\
-              (perplexity, min_encodings, encoding_indices) = self.vqvae(feature, prior_factor, future_returns)
+              (perplexity, min_encodings, encoding_indices) = self.vqvae(
+                  feature, prior_factor, market_feature, future_returns
+              )
         
         return recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)
     
@@ -42,14 +44,13 @@ class FactorVQVAE(pl.LightningModule):
         batch   = batch.float()
         parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
-        # market_feature is deliberately unused by the current baseline.
         
-        return feature, prior_factor, future_returns # (B, T, C), (B, P), (B, 10)
+        return feature, prior_factor, market_feature, future_returns
     
     def training_step(self, batch, batch_idx):
-        feature, prior_factor, future_returns = self._get_data(batch, batch_idx)
+        feature, prior_factor, market_feature, future_returns = self._get_data(batch, batch_idx)
 
-        recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)= self.forward(feature, prior_factor, future_returns)
+        recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)= self.forward(feature, prior_factor, market_feature, future_returns)
 
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('train_recon_loss', recon_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
@@ -61,8 +62,8 @@ class FactorVQVAE(pl.LightningModule):
         return {"loss": total_loss, "recon_loss": recon_loss, "vq_loss": vq_loss, "pred_loss": pred_loss}
     
     def validation_step(self, batch, batch_idx):
-        feature, prior_factor, future_returns = self._get_data(batch, batch_idx)
-        recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)= self.forward(feature, prior_factor, future_returns)
+        feature, prior_factor, market_feature, future_returns = self._get_data(batch, batch_idx)
+        recon_loss, vq_loss, pred_loss, total_loss, z_q, (perplexity, min_encodings, encoding_indices)= self.forward(feature, prior_factor, market_feature, future_returns)
 
         self.log('val_loss', total_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log('val_recon_loss', recon_loss, on_step=True, on_epoch=True, logger=True, sync_dist=True)

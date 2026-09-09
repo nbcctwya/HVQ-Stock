@@ -1,71 +1,85 @@
-# Experiment 027 — prism-master-stage1-encoder
+# Experiment 031 — prism-market-gated-stage1-encoder
 
 ## Base
 
-`main`
+`exp/027-prism-master-stage1-encoder`
 
-Stage 1 provenance：`self`。本实验必须自行训练新的 Stage 1；原 PRISM-VQ
-Stage 1 checkpoint 与新 encoder 结构不兼容，不能复用。
+Stage 1 provenance：`self`。Market Gate 增加了新的 Stage 1 参数，本实验必须
+自行训练 Stage 1，不复用实验 027 的 checkpoint。
 
 ## Idea / Motivation
 
-仅替换 PRISM-VQ Stage 1 的时空编码器：将原来的
-`GRU temporal summarization + CrossAssetTransformer` 替换为不含 Market
-Gate 的 MASTER-style encoder：
+在实验 027 的 MASTER-style Stage 1 encoder 上，仅加入 AlphaMaster Market
+Gate，验证 market-conditioned feature selection 是否能改善 VQ latent factor
+learning。股票特征的重要性可能随当前市场状态变化；在进入时空 encoder 与 VQ
+之前，以当前 regime 对 158 个个股特征进行条件化重加权，可能使 encoder 更
+容易提取有效信息。
+
+完整 Stage 1 路径为：
 
 ```text
-Input Projection -> PositionalEncoding -> TAttention -> SAttention -> TemporalAttention
+RevIN
+  -> Market Gate
+  -> Linear + LayerNorm + LeakyReLU feature transform
+  -> Input Projection
+  -> PositionalEncoding
+  -> TAttention
+  -> SAttention
+  -> TemporalAttention
+  -> Linear -> GELU -> Linear projection MLP
+  -> VQ
 ```
-
-原实现先用 GRU 将完整序列压缩成单个 hidden state，再进行横截面建模，可能
-过早丢失时序信息。本实验保持完整时间维，先做 temporal attention，再做
-cross-sectional attention，最后由 TemporalAttention 聚合，以检验这种表示
-能否产生更有效的 VQ latent。
 
 ## 核心修改
 
-- `PositionalEncoding`、`TAttention`、`SAttention`、`TemporalAttention`
-  直接复制自 `AlphaMaster/src/alphamaster/model.py`，计算逻辑不变；smoke 中
-  对四个 class 做 AST 比对，结果全部精确一致。
-- 保留原 Stage 1 的前置 `Linear -> LayerNorm -> LeakyReLU` feature transform。
-- 在前置变换后加入 `Linear(158, 128)` Input Projection，以现有
-  `hidden_size=128` 作为 MASTER-style encoder 的 model dimension。
-- 使用现有 encoder head/dropout 预算做必要接口适配：TAttention 与
-  SAttention 均为 2 heads、dropout 0.1；保持单个 TAttention 和单个
-  SAttention block。
-- 保留原 CrossAssetTransformer 后的
-  `Linear(128, 512) -> GELU -> Linear(512, 128)` projection MLP，使输出仍为
-  `(N_t, vq_embed_dim=128)`，无缝接入原 VectorQuantiser。
-- `configs/config.yaml` 默认设置 `vqvae.encoder.type: master`，直接运行默认
-  配置即为本实验，无需实验特有 CLI override。
+- `Gate` class 直接复制自 `AlphaMaster/src/alphamaster/model.py`，核心计算为
+  `Linear(63,158) -> softmax(output / beta) * 158`；tests 与 smoke 使用 AST
+  比对确认计算逻辑一致。
+- 从 canonical batch 取得 `market_feature`，严格只读取当前窗口最后时点：
+  `market_current = market_feature[:, -1, :]`，shape 为 `(N_t,63)`。
+- `gate` shape 为 `(N_t,158)`，通过
+  `feature_normalized * gate.unsqueeze(1)` 作用于同一股票完整 `T=20` 历史
+  窗口，并严格位于原 RevIN 后、原 feature transform 前。
+- beta 沿用 AlphaMaster / 实验 007 的固定规则：CSI300 为 10、SP500 为 5；
+  默认 `configs/config.yaml` 已完整固化该实验，无需实验特有 CLI override。
+- Stage 1 training/validation 与 Stage 2 frozen-encoder 路径均透传 market
+  feature；Stage 2 的 market 输入仅止于冻结的 Stage 1 encoder。
 
 ## 与 base 的区别
 
-唯一实验变量是 Stage 1 中的
-`GRU + CrossAssetTransformer -> MASTER-style encoder`。本实验明确不加入
-MASTER Market Gate。
+相对于实验 027，唯一实验变量是在 RevIN 与原 feature transform 之间增加上述
+Market Gate。027 的 Input Projection、PositionalEncoding、单个 TAttention、
+单个 SAttention、TemporalAttention、heads、dropout、维度以及
+`TAttention -> SAttention` 顺序全部不变；原前置 feature transform 与后置
+projection MLP 也不变。
 
-以下均与 `main` 保持不变：RevIN、前置 feature transform、后置 projection
-MLP、single VQ512、128 维 codebook、commitment/contrastive/dead-code
-机制、ReconstructionDecoder、prior-factor FiLM、SequencePredictorGRU、
-prediction target、所有 Stage 1 loss 与 weight；整个 Stage 2 的 MoE、routing、
-prior factors、loading generation、return predictor、loss 与训练协议也不变。
-数据划分、训练预算、Stage 1 seed 42、Stage 2 seed 0 与回测协议不变。
+single VQ512 / 128 维 codebook、VectorQuantiser、commitment/contrastive/
+dead-code 机制、ReconstructionDecoder、prior-factor FiLM、
+SequencePredictorGRU、prediction target、Stage 1 loss 与全部 weight 均保持
+不变。Stage 2 的 LoadingGenerator、MoE、routing、LatentValueHead、
+ReturnPredictor、loss 和训练逻辑保持不变，market feature 不直接进入任何
+Stage 2 downstream 模块。数据 schema/划分、训练预算、early stopping、
+Stage 1 seed 42、Stage 2 seed 0、回测协议和其他超参数均与 027 一致。
 
 ## Tests / Smoke
 
 Status: **PASS**
 
-- 全量单元测试：`91/91 PASS`；本实验新增测试 `9/9 PASS`。
-- 最小 synthetic smoke 完成一次完整 Stage 1 loss 的 backward/optimizer step，
-  生成 self Stage 1 checkpoint；Stage 2 随后以 strict 模式加载 encoder、
-  quantizer、RevIN，三者均为 `missing=0, unexpected=0`。
-- smoke 验证 Stage 1 latent 为 `(8, 128)`、single VQ codebook 为
-  `(512, 128)`、Market Gate/encoder GRU 均不存在、Stage 2 冻结 Stage 1 无
-  梯度，并完成 Stage 2 backward/optimizer step 与 strict checkpoint
-  round-trip。
-- 产物：`artifacts/027/smoke/`，其中报告为
-  `artifacts/027/smoke/smoke_report.json`，日志为
-  `artifacts/027/smoke/smoke.log`。
+- 全量单元测试：`99/99 PASS`；完整日志位于
+  `artifacts/031/smoke/unit_tests.log`。
+- 最小 synthetic smoke 完成完整 Stage 1 loss 的 backward/optimizer step，
+  encoder gradient L1 为 `25.304254525253782`，并生成 self Stage 1 checkpoint。
+- smoke 确认 AlphaMaster `Gate` 与四个 attention class 的 AST 精确一致；Gate
+  输入/输出为 `(8,63) -> (8,158)`、每样本权重和约为 158、CSI300 beta=10，
+  实际路径为 `RevIN -> Market Gate -> Feature Transform -> Input Projection ->
+  PositionalEncoding -> TAttention -> SAttention -> TemporalAttention -> Projection
+  MLP`。仅修改历史 market 不影响 gate/latent，修改末时点 market 会同时改变
+  gate 与 encoder latent，prior 改变不影响 Gate。
+- Stage 2 对 self Stage 1 checkpoint strict load：encoder、quantizer、RevIN 均
+  `missing=0, unexpected=0`；冻结 Stage 1 无梯度，VQ latent 为 `(8,128)`、
+  codebook 为 `(512,128)`，Stage 2 backward 与 strict checkpoint round-trip
+  均通过。
+- 产物目录：`artifacts/031/smoke/`；报告为 `smoke_report.json`，日志为
+  `smoke.log`，synthetic checkpoints 位于 `checkpoints/`。
 
-本阶段未启动正式长时间训练或正式回测。
+本阶段不启动正式长时间训练或正式回测。
