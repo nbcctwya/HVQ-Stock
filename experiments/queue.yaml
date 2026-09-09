@@ -267,3 +267,10 @@ experiments:
     commit: a0962cbe3eac5e21f4d71e23cf18e2e8f298c7dd
     status: pending
     stage1_source: self
+  - id: "028"
+    name: prism-temporal-attention-stage1
+    base: main
+    branch: exp/028-prism-temporal-attention-stage1
+    commit: 4494d99542f40be7d3136ab42836f306631f0584
+    status: pending
+    stage1_source: self
