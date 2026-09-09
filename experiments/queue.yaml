@@ -260,3 +260,10 @@ experiments:
     # (artifacts/010/run/.stage1.done -> the corrected PRISM-VQ external exact
     # checkpoint, single VQ512, seed 42).
     stage1_source: "010"
+  - id: "027"
+    name: prism-master-stage1-encoder
+    base: main
+    branch: exp/027-prism-master-stage1-encoder
+    commit: a0962cbe3eac5e21f4d71e23cf18e2e8f298c7dd
+    status: pending
+    stage1_source: self
