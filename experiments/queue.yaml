@@ -265,7 +265,7 @@ experiments:
     base: main
     branch: exp/027-prism-master-stage1-encoder
     commit: a0962cbe3eac5e21f4d71e23cf18e2e8f298c7dd
-    status: pending
+    status: running
     stage1_source: self
   - id: "028"
     name: prism-temporal-attention-stage1
