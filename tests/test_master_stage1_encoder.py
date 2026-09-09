@@ -1,4 +1,4 @@
-"""Tests for experiment 027's MASTER-style Stage 1 encoder."""
+"""Tests for experiment 030's mean-pooled MASTER-style Stage 1 encoder."""
 
 import sys
 import unittest
@@ -62,6 +62,7 @@ class MASTERStage1EncoderTest(unittest.TestCase):
         self.assertNotIn(nn.GRU, module_types)
         self.assertNotIn(nn.TransformerEncoder, module_types)
         self.assertNotIn(nn.TransformerEncoderLayer, module_types)
+        self.assertNotIn(TemporalAttention, module_types)
         self.assertFalse(any("gate" in name.lower() for name, _ in encoder.named_modules()))
         self.assertFalse(any("gate" in name.lower() for name, _ in encoder.named_parameters()))
 
@@ -73,7 +74,7 @@ class MASTERStage1EncoderTest(unittest.TestCase):
         self.assertIsInstance(master.pe, PositionalEncoding)
         self.assertIsInstance(master.tatten, TAttention)
         self.assertIsInstance(master.satten, SAttention)
-        self.assertIsInstance(master.temporalatten, TemporalAttention)
+        self.assertFalse(hasattr(master, "temporalatten"))
         self.assertEqual(master.x2y.in_features, 8)
         self.assertEqual(master.x2y.out_features, 8)
 
@@ -96,12 +97,22 @@ class MASTERStage1EncoderTest(unittest.TestCase):
         encoder = build_encoder().eval()
         seen = []
         shapes = {}
+        spatial_output = None
+        projection_input = None
 
         def record(name):
             def hook(_module, inputs, _output):
                 seen.append(name)
                 shapes[name] = tuple(inputs[0].shape)
             return hook
+
+        def capture_spatial_output(_module, _inputs, output):
+            nonlocal spatial_output
+            spatial_output = output.detach().clone()
+
+        def capture_projection_input(_module, inputs):
+            nonlocal projection_input
+            projection_input = inputs[0].detach().clone()
 
         modules = [
             ("front_linear", encoder.feature_transform.linear),
@@ -111,10 +122,11 @@ class MASTERStage1EncoderTest(unittest.TestCase):
             ("positional_encoding", encoder.master_encoder.pe),
             ("temporal_attention", encoder.master_encoder.tatten),
             ("spatial_attention", encoder.master_encoder.satten),
-            ("temporal_aggregation", encoder.master_encoder.temporalatten),
             ("projection_mlp", encoder.out_layer),
         ]
         handles = [module.register_forward_hook(record(name)) for name, module in modules]
+        handles.append(encoder.master_encoder.satten.register_forward_hook(capture_spatial_output))
+        handles.append(encoder.out_layer.register_forward_pre_hook(capture_projection_input))
         try:
             output = encoder(torch.randn(7, 5, 8))
         finally:
@@ -124,9 +136,24 @@ class MASTERStage1EncoderTest(unittest.TestCase):
         self.assertEqual(seen, [name for name, _ in modules])
         self.assertEqual(shapes["temporal_attention"], (7, 5, 8))
         self.assertEqual(shapes["spatial_attention"], (7, 5, 8))
-        self.assertEqual(shapes["temporal_aggregation"], (7, 5, 8))
         self.assertEqual(shapes["projection_mlp"], (7, 8))
+        self.assertEqual(tuple(spatial_output.shape), (7, 5, 8))
+        self.assertEqual(tuple(projection_input.shape), (7, 8))
+        self.assertTrue(torch.equal(projection_input, spatial_output.mean(dim=1)))
         self.assertEqual(output.shape, (7, 6))
+
+    def test_mean_pooling_is_parameter_free_arithmetic_mean(self):
+        encoder = build_encoder().eval().master_encoder
+        inputs = torch.randn(7, 5, 8)
+
+        with torch.no_grad():
+            attended = encoder.satten(encoder.tatten(encoder.pe(encoder.x2y(inputs))))
+            actual = encoder(inputs)
+
+        self.assertEqual(tuple(attended.shape), (7, 5, 8))
+        self.assertEqual(tuple(actual.shape), (7, 8))
+        self.assertTrue(torch.equal(actual, attended.mean(dim=1)))
+        self.assertFalse(hasattr(encoder, "temporalatten"))
 
     def test_output_connects_to_unchanged_vector_quantiser(self):
         encoder = build_encoder().train()

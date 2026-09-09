@@ -1,4 +1,4 @@
-"""Stage 1 encoder layers for experiment 027.
+"""Stage 1 encoder layers for experiment 030.
 
 The four attention components below are copied from
 ``AlphaMaster/src/alphamaster/model.py``. Their computations are deliberately
@@ -184,7 +184,7 @@ class TemporalAttention(nn.Module):
 
 
 class MASTERStyleEncoder(nn.Module):
-    """MASTER input projection and attention stack, without Market Gate."""
+    """MASTER attention stack with parameter-free temporal mean pooling."""
 
     def __init__(self, d_feat, d_model, t_nhead, s_nhead,
                  t_dropout_rate, s_dropout_rate):
@@ -197,14 +197,13 @@ class MASTERStyleEncoder(nn.Module):
         self.satten = SAttention(
             d_model=d_model, nhead=s_nhead, dropout=s_dropout_rate
         )
-        self.temporalatten = TemporalAttention(d_model=d_model)
 
     def forward(self, x):
         x = self.x2y(x)
         x = self.pe(x)
         x = self.tatten(x)
         x = self.satten(x)
-        return self.temporalatten(x)
+        return x.mean(dim=1)
 
 
 class SpatialEncoder(nn.Module):
