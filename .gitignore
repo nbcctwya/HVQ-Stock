@@ -12,3 +12,4 @@ wandb/
 logs/
 dataset/processed/
 *.pkl
+experiments/analysis/
