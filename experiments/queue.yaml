@@ -293,5 +293,5 @@ experiments:
     base: exp/027-prism-master-stage1-encoder
     branch: exp/031-prism-market-gated-stage1-encoder
     commit: 40f8740523656e2d9ffa7523412fb02d5d4b33b9
-    status: pending
+    status: running
     stage1_source: self
