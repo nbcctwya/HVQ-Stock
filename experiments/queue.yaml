@@ -279,7 +279,7 @@ experiments:
     base: exp/027-prism-master-stage1-encoder
     branch: exp/029-prism-spatial-first-stage1-encoder
     commit: 8b61fc866b36d1776153c02dc418336c824c07c2
-    status: running
+    status: done
     stage1_source: self
   - id: "030"
     name: prism-mean-pooling-stage1-encoder

@@ -82,18 +82,22 @@ Notes:
 
 ## Result
 
-Status: PENDING
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-IC:
-ICIR:
-RankIC:
-RankICIR:
+IC: 0.0339
+ICIR: 0.1993
+RankIC: 0.0499
+RankICIR: 0.2930
 
-Annual Return:
-Sharpe:
-Sortino:
-MDD:
-Calmar:
-Turnover:
+Annual Return: 17.71%（基准 6.40%，超额 11.31%）
+Sharpe: 1.0650
+Sortino: 1.6506
+MDD: -15.21%
+Calmar: 1.1640
+Turnover: 0.3274
 
 ## Conclusion
+
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 8b61fc866b36d1776153c02dc418336c824c07c2）。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5494.ckpt`（self-trained）；Stage 2 seed 0。
+
+产物：`artifacts/029/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
