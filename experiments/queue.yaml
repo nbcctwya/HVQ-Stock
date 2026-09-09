@@ -272,7 +272,7 @@ experiments:
     base: main
     branch: exp/028-prism-temporal-attention-stage1
     commit: 4494d99542f40be7d3136ab42836f306631f0584
-    status: pending
+    status: running
     stage1_source: self
   - id: "029"
     name: prism-spatial-first-stage1-encoder
