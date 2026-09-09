@@ -1,4 +1,4 @@
-"""Stage 1 encoder layers for experiment 027.
+"""Stage 1 encoder layers for experiment 029.
 
 The four attention components below are copied from
 ``AlphaMaster/src/alphamaster/model.py``. Their computations are deliberately
@@ -202,8 +202,8 @@ class MASTERStyleEncoder(nn.Module):
     def forward(self, x):
         x = self.x2y(x)
         x = self.pe(x)
-        x = self.tatten(x)
         x = self.satten(x)
+        x = self.tatten(x)
         return self.temporalatten(x)
 
 
@@ -225,7 +225,7 @@ class SpatialEncoder(nn.Module):
         super().__init__()
         if encoder_type != "master":
             raise ValueError(
-                "Experiment 027 requires vqvae.encoder.type='master'"
+                "Experiment 029 requires vqvae.encoder.type='master'"
             )
         if num_transformer_layers != 1:
             raise ValueError(

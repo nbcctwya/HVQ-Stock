@@ -1,4 +1,4 @@
-"""Tests for experiment 027's MASTER-style Stage 1 encoder."""
+"""Tests for experiment 029's spatial-first MASTER Stage 1 encoder."""
 
 import sys
 import unittest
@@ -109,8 +109,8 @@ class MASTERStage1EncoderTest(unittest.TestCase):
             ("front_activation", encoder.feature_transform.leakyrelu),
             ("input_projection", encoder.master_encoder.x2y),
             ("positional_encoding", encoder.master_encoder.pe),
-            ("temporal_attention", encoder.master_encoder.tatten),
             ("spatial_attention", encoder.master_encoder.satten),
+            ("temporal_attention", encoder.master_encoder.tatten),
             ("temporal_aggregation", encoder.master_encoder.temporalatten),
             ("projection_mlp", encoder.out_layer),
         ]
@@ -127,6 +127,36 @@ class MASTERStage1EncoderTest(unittest.TestCase):
         self.assertEqual(shapes["temporal_aggregation"], (7, 5, 8))
         self.assertEqual(shapes["projection_mlp"], (7, 8))
         self.assertEqual(output.shape, (7, 6))
+
+    def test_only_attention_execution_order_changes(self):
+        torch.manual_seed(29)
+        encoder = build_encoder().eval()
+        inputs = torch.randn(7, 5, 8)
+
+        with torch.no_grad():
+            actual = encoder(inputs)
+            transformed = encoder.feature_transform(inputs)
+            positioned = encoder.master_encoder.pe(
+                encoder.master_encoder.x2y(transformed)
+            )
+            spatial_first = encoder.master_encoder.temporalatten(
+                encoder.master_encoder.tatten(
+                    encoder.master_encoder.satten(positioned)
+                )
+            )
+            temporal_first = encoder.master_encoder.temporalatten(
+                encoder.master_encoder.satten(
+                    encoder.master_encoder.tatten(positioned)
+                )
+            )
+
+        self.assertTrue(torch.equal(actual, encoder.out_layer(spatial_first)))
+        self.assertFalse(
+            torch.equal(
+                encoder.out_layer(spatial_first),
+                encoder.out_layer(temporal_first),
+            )
+        )
 
     def test_output_connects_to_unchanged_vector_quantiser(self):
         encoder = build_encoder().train()

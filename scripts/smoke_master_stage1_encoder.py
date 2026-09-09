@@ -1,4 +1,4 @@
-"""Minimal synthetic Stage 1 -> Stage 2 smoke for experiment 027."""
+"""Minimal synthetic Stage 1 -> Stage 2 smoke for experiment 029."""
 
 import ast
 import copy
@@ -19,7 +19,7 @@ from trainer.train_ypred import GenerateReturn
 from utils import seed_everything
 
 
-ARTIFACT_ROOT = ROOT / "artifacts" / "027" / "smoke"
+ARTIFACT_ROOT = ROOT / "artifacts" / "029" / "smoke"
 SOURCE_MODEL = ROOT.parent / "AlphaMaster" / "src" / "alphamaster" / "model.py"
 COPIED_MODEL = ROOT / "module" / "layers" / "encoder.py"
 COPIED_CLASSES = (
@@ -89,7 +89,7 @@ def main():
         "test_period": ["2023-01-01", "2025-12-31"],
     }
     if encoder_config["type"] != "master":
-        raise AssertionError("Default config does not enable experiment 027")
+        raise AssertionError("Default config does not enable experiment 029")
     if config["train"]["seed"] != 0:
         raise AssertionError("Stage 2 seed changed")
     for key, expected in expected_splits.items():
@@ -116,7 +116,31 @@ def main():
         stage1.parameters(), lr=config["train"]["learning_rate"]
     )
     stage1_optimizer.zero_grad()
-    stage1_output = stage1(feature, prior, future_returns)
+    attention_order = []
+    master = stage1.vqvae.spatial_encoder.master_encoder
+    ordered_modules = (
+        ("input_projection", master.x2y),
+        ("positional_encoding", master.pe),
+        ("spatial_attention", master.satten),
+        ("temporal_attention", master.tatten),
+        ("temporal_aggregation", master.temporalatten),
+    )
+    handles = [
+        module.register_forward_hook(
+            lambda _module, _inputs, _output, name=name: attention_order.append(name)
+        )
+        for name, module in ordered_modules
+    ]
+    try:
+        stage1_output = stage1(feature, prior, future_returns)
+    finally:
+        for handle in handles:
+            handle.remove()
+    expected_order = [name for name, _module in ordered_modules]
+    if attention_order != expected_order:
+        raise AssertionError(
+            f"Unexpected Stage 1 attention order: {attention_order}"
+        )
     recon_loss, vq_loss, pred_loss, total_loss, z_q, _ = stage1_output
     if z_q.shape != (8, 128):
         raise AssertionError(f"Unexpected Stage 1 latent shape: {tuple(z_q.shape)}")
@@ -132,7 +156,7 @@ def main():
         raise AssertionError("MASTER-style Stage 1 encoder received no gradient")
     stage1_optimizer.step()
 
-    stage1_checkpoint = checkpoint_dir / "master-stage1-smoke.ckpt"
+    stage1_checkpoint = checkpoint_dir / "spatial-first-stage1-smoke.ckpt"
     save_lightning_checkpoint(stage1_checkpoint, stage1, global_step=1)
 
     # GenerateReturn's normal constructor performs strict loading of encoder,
@@ -179,7 +203,7 @@ def main():
         raise AssertionError("Stage 2 received no gradient")
     stage2_optimizer.step()
 
-    stage2_checkpoint = checkpoint_dir / "master-stage2-smoke.ckpt"
+    stage2_checkpoint = checkpoint_dir / "spatial-first-stage2-smoke.ckpt"
     save_lightning_checkpoint(stage2_checkpoint, stage2, global_step=1)
     restored = GenerateReturn.load_from_checkpoint(
         stage2_checkpoint,
@@ -200,7 +224,10 @@ def main():
 
     report = {
         "status": "PASS",
-        "experiment": {"id": "027", "name": "prism-master-stage1-encoder"},
+        "experiment": {
+            "id": "029",
+            "name": "prism-spatial-first-stage1-encoder",
+        },
         "alpha_master_source": str(SOURCE_MODEL.relative_to(ROOT.parent)),
         "alpha_master_component_ast_exact": source_copy,
         "stage1": {
@@ -217,6 +244,7 @@ def main():
             },
             "market_gate_absent": True,
             "gru_absent": True,
+            "attention_order": attention_order,
         },
         "stage2_compatibility": {
             "encoder_strict_load": {"missing": 0, "unexpected": 0},
