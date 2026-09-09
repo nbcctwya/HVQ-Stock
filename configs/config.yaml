@@ -77,6 +77,7 @@ predictor:
   pred_len: 20  
   moe_hidden: 64 
   shared_expert: true  # 010: always-on zero-initialized residual expert
+  market_conditioned_routing: true  # 026: 020 current-market additive bias on routed clean logits
   dropout: 0.1
 
   transformer:

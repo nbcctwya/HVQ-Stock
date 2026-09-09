@@ -79,12 +79,15 @@ def run_inference(model, data_loader, config, device=None):
 
         parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
-        # market_feature is deliberately unused by the current baseline.
         label = parts.target(target_index + 1)
 
         # wo_prior ablation drops prior_factor.
         if hasattr(model, 'num_prior_factors') and hasattr(model, 'return_predictor') and not model.return_predictor.use_prior:
             y_pred, aux_loss = model(feature)
+        elif getattr(model, 'market_conditioned_routing', False):
+            y_pred, beta_p, beta_l, z_q, _ = model(
+                feature, prior_factor, market_feature
+            )
         else:
             y_pred, beta_p, beta_l, z_q, _ = model(feature, prior_factor)
 

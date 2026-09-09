@@ -60,6 +60,9 @@ class GenerateReturn(pl.LightningModule):
         self.vq_embed_dim  = vqvae_cfg['vq_embed_dim']   # d (VQ / encoder output dim)
         self.seq_len       = vqvae_cfg['seq_len']        # T_window for reconstruction
         self.aux_imp       = config['predictor']['aux_imp']
+        self.market_conditioned_routing = config['predictor'].get(
+            'market_conditioned_routing', False
+        )
 
         # Quantizer
         self.decay         = vqvae_cfg['quantizer']['decay']
@@ -165,13 +168,23 @@ class GenerateReturn(pl.LightningModule):
         batch   = batch.float()
         parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
-        # market_feature is deliberately unused by the current baseline.
         
         label = parts.target(self.target_index + 1)
 
-        return feature, prior_factor, label
+        return feature, prior_factor, market_feature, label
     
-    def forward(self, feature, prior_factor):
+    @staticmethod
+    def current_market_state(market_feature):
+        """Extract the current market state from canonical ``[B, T, 63]`` input."""
+        if market_feature.ndim != 3 or market_feature.shape[1] < 1 \
+                or market_feature.shape[2] != 63:
+            raise ValueError(
+                "market_feature must have canonical shape [B, T, 63], got "
+                f"{tuple(market_feature.shape)}"
+            )
+        return market_feature[:, -1, :]
+
+    def forward(self, feature, prior_factor, market_feature=None):
         
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
@@ -180,7 +193,21 @@ class GenerateReturn(pl.LightningModule):
         z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
+        market_state = None
+        if self.market_conditioned_routing:
+            if market_feature is None:
+                raise ValueError(
+                    "market_feature is required for market-conditioned routing"
+                )
+            if market_feature.shape[0] != feature.shape[0]:
+                raise ValueError(
+                    "market_feature batch size must match stock feature batch size"
+                )
+            market_state = self.current_market_state(market_feature)
+
+        alpha, beta_p, beta_l, loss_imp = self.loadings(
+            feature, z_q, market_state=market_state
+        )
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
         f_latent = self.latent_value_head(z_q)
@@ -197,8 +224,10 @@ class GenerateReturn(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, market_feature, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, market_feature
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss
@@ -212,8 +241,10 @@ class GenerateReturn(pl.LightningModule):
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, market_feature, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, market_feature
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss

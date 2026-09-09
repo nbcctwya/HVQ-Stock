@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 # from module.layers import TemporalEncoder as expert
 # from module.layers.src import router
@@ -157,6 +158,8 @@ class FactorGatedMoE(nn.Module):
                  noisy_gating: bool = True,  
                  k=2,
                  use_shared_expert: bool = False,
+                 market_conditioned_routing: bool = False,
+                 market_dim: int = 63,
                  ):
         super(FactorGatedMoE, self).__init__()
         self.gate_input_size = gate_input_size
@@ -166,6 +169,8 @@ class FactorGatedMoE(nn.Module):
         self.noisy_gating = noisy_gating
         self.k = k
         self.use_shared_expert = use_shared_expert
+        self.market_conditioned_routing = market_conditioned_routing
+        self.market_dim = market_dim
         
         self.experts = nn.ModuleList([
             SimpleMLP(expert_input_size, expert_input_size, hidden_size) 
@@ -204,6 +209,19 @@ class FactorGatedMoE(nn.Module):
             nn.init.zeros_(final_linear.bias)
         else:
             self.shared_expert = None
+
+        # The market routing adapter is deliberately created after every
+        # existing (010) parameter and under a forked RNG so enabling it
+        # cannot perturb any baseline initialization under an identical
+        # random seed. Its weight is explicitly zero-initialized.
+        if self.market_conditioned_routing:
+            with torch.random.fork_rng(devices=[]):
+                self.market_routing_adapter = nn.Linear(
+                    market_dim, num_experts, bias=False
+                )
+            nn.init.zeros_(self.market_routing_adapter.weight)
+        else:
+            self.market_routing_adapter = None
 
     def cv_squared(self, x):
         """The squared coefficient of variation of a sample.
@@ -267,7 +285,33 @@ class FactorGatedMoE(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
+    def normalize_market(self, market_state):
+        """Parameter-free per-sample normalization over the 63 market fields."""
+        if market_state.ndim != 2 or market_state.shape[1] != self.market_dim:
+            raise ValueError(
+                f"market_state must have shape [B, {self.market_dim}], got "
+                f"{tuple(market_state.shape)}"
+            )
+        return F.layer_norm(market_state, (self.market_dim,))
+
+    def clean_routing_logits(self, x, market_state=None):
+        """Return the original router logits plus the optional market bias."""
+        clean_logits = self.gate(x)
+        if not self.market_conditioned_routing:
+            return clean_logits
+        if market_state is None:
+            raise ValueError("market_state is required for market-conditioned routing")
+        if market_state.shape[0] != x.shape[0]:
+            raise ValueError(
+                "market_state batch size must match the routing input batch size"
+            )
+        market_state = market_state.to(device=x.device, dtype=x.dtype)
+        delta_logits = self.market_routing_adapter(
+            self.normalize_market(market_state)
+        )
+        return clean_logits + delta_logits
+
+    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2, market_state=None):
         """Noisy top-k gating.
         See paper: https://arxiv.org/abs/1701.06538.
         Args:
@@ -278,7 +322,7 @@ class FactorGatedMoE(nn.Module):
           gates: a Tensor with shape [batch_size, num_experts]
           load: a Tensor with shape [num_experts]
         """
-        clean_logits = self.gate(x)
+        clean_logits = self.clean_routing_logits(x, market_state)
 
         if self.noisy_gating and train:
             raw_noise_stddev = self.noise(x)
@@ -311,7 +355,7 @@ class FactorGatedMoE(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
 
-    def forward(self, x, z, loss_coef=1): #1e-2):
+    def forward(self, x, z, loss_coef=1, market_state=None): #1e-2):
         """Args:
         x: tensor shape [batch_size, input_size]
         train: a boolean scalar.
@@ -323,7 +367,9 @@ class FactorGatedMoE(nn.Module):
         training loss of the model.  The backpropagation of this loss
         encourages all experts to be approximately equally used across a batch.
         """
-        gates, load = self.noisy_top_k_gating(z, self.training)
+        gates, load = self.noisy_top_k_gating(
+            z, self.training, market_state=market_state
+        )
         # calculate importance loss
         importance = gates.sum(0)
         loss = self.cv_squared(importance) + self.cv_squared(load)

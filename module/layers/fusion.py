@@ -60,7 +60,8 @@ class HyperFusion(nn.Module):
                  num_experts: int = 4,
                  moe_k: int = 1,
                  hidden_size: int = 64,
-                 use_shared_expert: bool = False):
+                 use_shared_expert: bool = False,
+                 market_conditioned_routing: bool = False):
         super().__init__()
 
         # 1. Input projection
@@ -82,6 +83,7 @@ class HyperFusion(nn.Module):
             num_experts=num_experts,
             k=moe_k,
             use_shared_expert=use_shared_expert,
+            market_conditioned_routing=market_conditioned_routing,
         )
 
         # 3. Base beta heads (from h)
@@ -95,13 +97,15 @@ class HyperFusion(nn.Module):
         # 5. Alpha head
         self.alpha_head = nn.Linear(hidden_size, 1)
 
-    def forward(self, h, z):
+    def forward(self, h, z, market_state=None):
         h_norm = self.norm_h(h)
         z_norm = self.norm_z(z)
 
         x_fused = torch.cat([h_norm, z_norm], dim=-1)
         x_proj = self.input_proj(x_fused)
-        moe_out, moe_loss = self.moe(x=x_proj, z=z_norm)
+        moe_out, moe_loss = self.moe(
+            x=x_proj, z=z_norm, market_state=market_state
+        )
 
         base_beta_p = self.base_beta_prior_head(h)
         base_beta_l = self.base_beta_latent_head(h)
