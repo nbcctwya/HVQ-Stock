@@ -93,6 +93,8 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
+  # 025: 019 quantization-confidence adapter on top of 010 shared-routed MoE
+  quantization_confidence_adapter: true
   
 train:
   seed: 0 # 
