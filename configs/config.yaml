@@ -16,8 +16,13 @@ vqvae:
   num_embed: 512    
 
   encoder:
+    type: 'master'
     num_heads: 2 
     num_layers: 1
+    temporal_num_heads: 2
+    spatial_num_heads: 2
+    temporal_dropout: 0.1
+    spatial_dropout: 0.1
 
   quantizer:
     decay: 0.95

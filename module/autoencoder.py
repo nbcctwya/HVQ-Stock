@@ -31,8 +31,9 @@ class VQVAE(nn.Module):
         self.commit_weight = vqvae_cfg['quantizer']['commit_weight']  # beta
 
         # Encoder
-        self.transformer_heads = vqvae_cfg['encoder']['num_heads']
-        self.transformer_layers = vqvae_cfg['encoder']['num_layers']
+        encoder_cfg = vqvae_cfg['encoder']
+        self.transformer_heads = encoder_cfg['num_heads']
+        self.transformer_layers = encoder_cfg['num_layers']
 
         # Decoder
         self.initial_T = vqvae_cfg['decoder']['initial_T']
@@ -45,7 +46,12 @@ class VQVAE(nn.Module):
             gru_hidden_size=self.hidden_size,
             num_transformer_heads=self.transformer_heads,
             num_transformer_layers=self.transformer_layers,
-            final_embed_dim_d=self.vq_embed_dim
+            final_embed_dim_d=self.vq_embed_dim,
+            encoder_type=encoder_cfg.get('type', 'master'),
+            temporal_num_heads=encoder_cfg.get('temporal_num_heads'),
+            spatial_num_heads=encoder_cfg.get('spatial_num_heads'),
+            temporal_dropout=encoder_cfg.get('temporal_dropout', 0.1),
+            spatial_dropout=encoder_cfg.get('spatial_dropout', 0.1),
         )
 
         self.quantizer = VectorQuantiser(
