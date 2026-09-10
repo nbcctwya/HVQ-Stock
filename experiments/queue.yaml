@@ -307,7 +307,7 @@ experiments:
     base: exp/025-combine-010-019-shared-routed-quant-confidence
     branch: exp/033-combine-025-027-master-stage1
     commit: ba57237457e3902da4a0dd770c60ddefc867e856
-    status: pending
+    status: running
     # Stage 2-only experiment on top of 025: reuse 027's formal Stage 1
     # (artifacts/027/run/.stage1.done -> 027's self-trained MASTER-style
     # encoder checkpoint, single VQ512, seed 42). 025's Stage 2
