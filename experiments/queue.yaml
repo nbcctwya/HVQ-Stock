@@ -295,3 +295,10 @@ experiments:
     commit: 40f8740523656e2d9ffa7523412fb02d5d4b33b9
     status: done
     stage1_source: self
+  - id: "032"
+    name: prism-spatial-first-market-gated-stage1-encoder
+    base: exp/029-prism-spatial-first-stage1-encoder
+    branch: exp/032-prism-spatial-first-market-gated-stage1-encoder
+    commit: 0e324ec93c272415a92b61d283d586cfe9e06764
+    status: pending
+    stage1_source: self
