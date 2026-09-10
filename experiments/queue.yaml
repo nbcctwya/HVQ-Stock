@@ -330,7 +330,7 @@ experiments:
     base: exp/025-combine-010-019-shared-routed-quant-confidence
     branch: exp/035-combine-025-031-market-gated-stage1
     commit: c70d698ed2121b6128901d2a067ca51db047618f
-    status: pending
+    status: running
     # Stage 2-only experiment on top of 025: reuse 031's formal Stage 1
     # (artifacts/031/run/.stage1.done -> 031's self-trained market-gated
     # MASTER-style encoder checkpoint, single VQ512, seed 42). 025's
