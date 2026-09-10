@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 # from module.layers import TemporalEncoder as expert
 # from module.layers.src import router
@@ -157,6 +158,7 @@ class FactorGatedMoE(nn.Module):
                  noisy_gating: bool = True,  
                  k=2,
                  use_shared_expert: bool = False,
+                 decoupling_lambda: float = 0.0,
                  ):
         super(FactorGatedMoE, self).__init__()
         self.gate_input_size = gate_input_size
@@ -166,6 +168,14 @@ class FactorGatedMoE(nn.Module):
         self.noisy_gating = noisy_gating
         self.k = k
         self.use_shared_expert = use_shared_expert
+        self.decoupling_lambda = float(decoupling_lambda)
+
+        if self.decoupling_lambda < 0:
+            raise ValueError("decoupling_lambda must be non-negative")
+        if self.decoupling_lambda > 0 and not self.use_shared_expert:
+            raise ValueError(
+                "Shared-Routed decoupling requires use_shared_expert=True"
+            )
         
         self.experts = nn.ModuleList([
             SimpleMLP(expert_input_size, expert_input_size, hidden_size) 
@@ -204,6 +214,16 @@ class FactorGatedMoE(nn.Module):
             nn.init.zeros_(final_linear.bias)
         else:
             self.shared_expert = None
+
+    @staticmethod
+    def shared_routed_decoupling_loss(shared_out, routed_out, eps=1e-8):
+        """Mean squared per-sample cosine similarity of both expert paths."""
+        if shared_out.shape != routed_out.shape:
+            raise ValueError("shared_out and routed_out must have identical shapes")
+        cosine = F.cosine_similarity(
+            shared_out.float(), routed_out.float(), dim=-1, eps=eps
+        )
+        return cosine.square().mean()
 
     def cv_squared(self, x):
         """The squared coefficient of variation of a sample.
@@ -326,8 +346,8 @@ class FactorGatedMoE(nn.Module):
         gates, load = self.noisy_top_k_gating(z, self.training)
         # calculate importance loss
         importance = gates.sum(0)
-        loss = self.cv_squared(importance) + self.cv_squared(load)
-        loss *= loss_coef
+        route_loss = self.cv_squared(importance) + self.cv_squared(load)
+        route_loss *= loss_coef
 
         dispatcher = SparseDispatcher(self.num_experts, gates)
         
@@ -342,8 +362,16 @@ class FactorGatedMoE(nn.Module):
         if self.shared_expert is not None:
             shared_out = self.shared_expert(x)
             y = shared_out + routed_out
+            if self.decoupling_lambda > 0:
+                decoupling_loss = self.shared_routed_decoupling_loss(
+                    shared_out, routed_out
+                )
+                loss = route_loss + self.decoupling_lambda * decoupling_loss
+            else:
+                loss = route_loss
         else:
             y = routed_out
+            loss = route_loss
 
         return y, loss
     

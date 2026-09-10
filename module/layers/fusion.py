@@ -60,7 +60,8 @@ class HyperFusion(nn.Module):
                  num_experts: int = 4,
                  moe_k: int = 1,
                  hidden_size: int = 64,
-                 use_shared_expert: bool = False):
+                 use_shared_expert: bool = False,
+                 decoupling_lambda: float = 0.0):
         super().__init__()
 
         # 1. Input projection
@@ -82,6 +83,7 @@ class HyperFusion(nn.Module):
             num_experts=num_experts,
             k=moe_k,
             use_shared_expert=use_shared_expert,
+            decoupling_lambda=decoupling_lambda,
         )
 
         # 3. Base beta heads (from h)
