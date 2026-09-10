@@ -1,6 +1,6 @@
-"""Stage 1 encoder layers for experiment 029.
+"""Stage 1 encoder layers for experiment 032.
 
-The four attention components below are copied from
+The Market Gate and four attention components below are copied from
 ``AlphaMaster/src/alphamaster/model.py``. Their computations are deliberately
 kept unchanged; only the surrounding VQ-VAE interface is adapted here.
 """
@@ -169,6 +169,20 @@ class TAttention(nn.Module):
 
 
 # Copied from AlphaMaster/src/alphamaster/model.py; no algorithmic changes.
+class Gate(nn.Module):
+    def __init__(self, d_input, d_output,  beta=1.0):
+        super().__init__()
+        self.trans = nn.Linear(d_input, d_output)
+        self.d_output =d_output
+        self.t = beta
+
+    def forward(self, gate_input):
+        output = self.trans(gate_input)
+        output = torch.softmax(output/self.t, dim=-1)
+        return self.d_output*output
+
+
+# Copied from AlphaMaster/src/alphamaster/model.py; no algorithmic changes.
 class TemporalAttention(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -184,7 +198,7 @@ class TemporalAttention(nn.Module):
 
 
 class MASTERStyleEncoder(nn.Module):
-    """MASTER input projection and attention stack, without Market Gate."""
+    """Experiment 029's unchanged spatial-first MASTER attention stack."""
 
     def __init__(self, d_feat, d_model, t_nhead, s_nhead,
                  t_dropout_rate, s_dropout_rate):
@@ -208,7 +222,7 @@ class MASTERStyleEncoder(nn.Module):
 
 
 class SpatialEncoder(nn.Module):
-    """Stage 1: preserved feature transform + MASTER-style encoder + MLP."""
+    """Stage 1: Market Gate + preserved 029 spatial-first encoder path."""
 
     def __init__(self,
                  input_features_C,
@@ -221,11 +235,13 @@ class SpatialEncoder(nn.Module):
                  temporal_num_heads=None,
                  spatial_num_heads=None,
                  temporal_dropout=0.1,
-                 spatial_dropout=0.1):
+                 spatial_dropout=0.1,
+                 market_input_dim=63,
+                 market_beta=10):
         super().__init__()
         if encoder_type != "master":
             raise ValueError(
-                "Experiment 029 requires vqvae.encoder.type='master'"
+                "Experiment 032 requires vqvae.encoder.type='master'"
             )
         if num_transformer_layers != 1:
             raise ValueError(
@@ -238,6 +254,14 @@ class SpatialEncoder(nn.Module):
         self.T_window = T_window
         self.C = input_features_C
         self.hidden_size = gru_hidden_size
+        self.market_input_dim = market_input_dim
+
+        # AlphaMaster Market Gate. VQVAE applies the unchanged RevIN before
+        # entering this module; the gate is therefore strictly before the
+        # preserved feature transform below.
+        self.feature_gate = Gate(
+            market_input_dim, input_features_C, beta=market_beta
+        )
 
         # Preserved verbatim from the original pre-GRU feature path.
         self.feature_transform = FeatureTransform(input_features_C)
@@ -259,8 +283,23 @@ class SpatialEncoder(nn.Module):
             nn.Linear(gru_hidden_size * 4, final_embed_dim_d)
         )
 
-    def forward(self, x_batch):
+    def forward(self, x_batch, market_feature):
         # x_batch: (N_t, T_window, C), one day's cross-section.
-        transformed = self.feature_transform(x_batch)
+        if market_feature.ndim != 3:
+            raise ValueError(
+                "market_feature must have shape (N_t, T_window, market_dim)"
+            )
+        if market_feature.shape[:2] != x_batch.shape[:2]:
+            raise ValueError("stock and market tensors must share (N_t, T_window)")
+        if market_feature.shape[-1] != self.market_input_dim:
+            raise ValueError(
+                f"Expected {self.market_input_dim} market features, got "
+                f"{market_feature.shape[-1]}"
+            )
+
+        market_current = market_feature[:, -1, :]
+        gate = self.feature_gate(market_current)
+        feature_gated = x_batch * gate.unsqueeze(1)
+        transformed = self.feature_transform(feature_gated)
         encoded = self.master_encoder(transformed)
         return self.out_layer(encoded)

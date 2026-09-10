@@ -23,6 +23,11 @@ vqvae:
     spatial_num_heads: 2
     temporal_dropout: 0.1
     spatial_dropout: 0.1
+    market_gate:
+      input_dim: 63
+      beta:
+        csi300: 10
+        sp500: 5
 
   quantizer:
     decay: 0.95

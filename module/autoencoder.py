@@ -34,6 +34,10 @@ class VQVAE(nn.Module):
         encoder_cfg = vqvae_cfg['encoder']
         self.transformer_heads = encoder_cfg['num_heads']
         self.transformer_layers = encoder_cfg['num_layers']
+        market_gate_cfg = encoder_cfg['market_gate']
+        universe = config['data']['universe']
+        self.market_input_dim = market_gate_cfg['input_dim']
+        self.market_beta = market_gate_cfg['beta'][universe]
 
         # Decoder
         self.initial_T = vqvae_cfg['decoder']['initial_T']
@@ -52,6 +56,8 @@ class VQVAE(nn.Module):
             spatial_num_heads=encoder_cfg.get('spatial_num_heads'),
             temporal_dropout=encoder_cfg.get('temporal_dropout', 0.1),
             spatial_dropout=encoder_cfg.get('spatial_dropout', 0.1),
+            market_input_dim=self.market_input_dim,
+            market_beta=self.market_beta,
         )
 
         self.quantizer = VectorQuantiser(
@@ -107,15 +113,17 @@ class VQVAE(nn.Module):
         loss = F.mse_loss(pred[mask], label[mask])
         return loss
 
-    def forward(self, feature, prior_factor, future_returns):
-        # feature: (B, T, C); prior_factor: (B, P) or (1, P); future_returns: (B, H)
+    def forward(self, feature, prior_factor, market_feature, future_returns):
+        # feature: (B,T,C); prior: (B,P); market: (B,T,63); returns: (B,H)
         prior_factor_normed = self.layer_norm(prior_factor)
 
         # 1. Reverse Instance Normalization
         feature_normalized = self.revin(feature, mode="norm")
 
         # 2. Cross-asset interaction (shared across assets)
-        h_batch = self.spatial_encoder(feature_normalized)  # (B, d)
+        h_batch = self.spatial_encoder(
+            feature_normalized, market_feature
+        )  # (B, d)
 
         # 3. Quantize factors. z_q applies STE: value from e_k, gradient from h_batch.
         # vq_loss = commitment loss + codebook loss.
