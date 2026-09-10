@@ -31,7 +31,14 @@ def tiny_config(adapter=True, shared_expert=True):
             "num_prior_factors": 3,
             "vq_embed_dim": 8,
             "num_embed": 16,
-            "encoder": {"num_heads": 2, "num_layers": 1},
+            "encoder": {
+                "num_heads": 2,
+                "num_layers": 1,
+                "market_gate": {
+                    "input_dim": 3,
+                    "beta": {"csi300": 10, "sp500": 5},
+                },
+            },
             "quantizer": {
                 "decay": 0.95,
                 "commit_weight": 0.25,
@@ -69,6 +76,7 @@ def tiny_config(adapter=True, shared_expert=True):
                 "prepend_structure_token": True,
             },
         },
+        "data": {"universe": "csi300"},
         "train": {"learning_rate": 0.0001},
     }
 
@@ -84,10 +92,10 @@ def build_model(adapter=True, shared_expert=True, seed=0):
         return GenerateReturn(config, T_max=10)
 
 
-def stage1_latents(model, feature):
+def stage1_latents(model, feature, market):
     with torch.no_grad():
         feature_normalized = model.revin(feature, mode="norm")
-        h_batch = model.encoder(feature_normalized)
+        h_batch = model.encoder(feature_normalized, market)
         z_q = model.quantizer(h_batch)[0]
     return h_batch, z_q
 
@@ -162,9 +170,10 @@ class Inheritance010Tests(unittest.TestCase):
         adapted = build_model(adapter=True, seed=13).eval()
         feature = torch.randn(7, 5, 8)
         prior = torch.randn(7, 3)
+        market = torch.randn(7, 5, 3)
 
-        base_out = base(feature, prior)
-        adapted_out = adapted(feature, prior)
+        base_out = base(feature, prior, market)
+        adapted_out = adapted(feature, prior, market)
 
         self.assertTrue(torch.equal(base_out[4], adapted_out[4]))
 
@@ -220,6 +229,7 @@ class Fidelity019Tests(unittest.TestCase):
             model.quantization_confidence_adapter.bias.fill_(0.25)
         feature = torch.randn(7, 5, 8)
         prior = torch.randn(7, 3)
+        market = torch.randn(7, 5, 3)
         seen = {"loadings": [], "latent_head": []}
         loadings_handle = model.loadings.register_forward_pre_hook(
             lambda _module, inputs: seen["loadings"].append(inputs[1].detach().clone())
@@ -230,7 +240,7 @@ class Fidelity019Tests(unittest.TestCase):
             )
         )
 
-        output = model(feature, prior)
+        output = model(feature, prior, market)
         loadings_handle.remove()
         latent_handle.remove()
 
@@ -246,6 +256,7 @@ class Fidelity019Tests(unittest.TestCase):
             model.quantization_confidence_adapter.bias.fill_(0.25)
         feature = torch.randn(7, 5, 8)
         prior = torch.randn(7, 3)
+        market = torch.randn(7, 5, 3)
         seen = {"moe": [], "fusion": [], "temporal": []}
         handles = [
             # HyperFusion calls the MoE with kwargs and LayerNorms the latent
@@ -269,7 +280,7 @@ class Fidelity019Tests(unittest.TestCase):
             ),
         ]
 
-        output = model(feature, prior)
+        output = model(feature, prior, market)
         for handle in handles:
             handle.remove()
 
@@ -285,6 +296,7 @@ class Fidelity019Tests(unittest.TestCase):
         model = build_model().eval()
         feature = torch.randn(11, 5, 8, requires_grad=True)
         prior = torch.randn(11, 3)
+        market = torch.randn(11, 5, 3)
         encoder_outputs = []
 
         def capture_encoder_output(_module, _inputs, output):
@@ -292,7 +304,7 @@ class Fidelity019Tests(unittest.TestCase):
             encoder_outputs.append(output)
 
         handle = model.encoder.register_forward_hook(capture_encoder_output)
-        y_pred = model(feature, prior)[0]
+        y_pred = model(feature, prior, market)[0]
         y_pred.sum().backward()
         handle.remove()
 
@@ -312,6 +324,7 @@ class BaselineEquivalenceTests(unittest.TestCase):
         self.adapted = build_model(adapter=True, seed=4321).eval()
         self.feature = torch.randn(9, 5, 8)
         self.prior = torch.randn(9, 3)
+        self.market = torch.randn(9, 5, 3)
 
     def test_existing_parameter_initialization_bitwise_equal_010(self):
         adapted_base_state = {
@@ -325,7 +338,7 @@ class BaselineEquivalenceTests(unittest.TestCase):
             self.assertTrue(torch.equal(value, adapted_base_state[key]), msg=key)
 
     def test_zero_init_stage2_latent_bitwise_equal_z_q(self):
-        h_batch, z_q = stage1_latents(self.adapted, self.feature)
+        h_batch, z_q = stage1_latents(self.adapted, self.feature, self.market)
         z_stage2 = self.adapted.build_stage2_latent(h_batch, z_q)
 
         self.assertTrue(torch.equal(z_stage2, z_q))
@@ -342,8 +355,8 @@ class BaselineEquivalenceTests(unittest.TestCase):
                 )
             ),
         ]
-        self.base(self.feature, self.prior)
-        self.adapted(self.feature, self.prior)
+        self.base(self.feature, self.prior, self.market)
+        self.adapted(self.feature, self.prior, self.market)
         for handle in handles:
             handle.remove()
 
@@ -370,8 +383,8 @@ class BaselineEquivalenceTests(unittest.TestCase):
                 )
             )
 
-        self.base(self.feature, self.prior)
-        self.adapted(self.feature, self.prior)
+        self.base(self.feature, self.prior, self.market)
+        self.adapted(self.feature, self.prior, self.market)
         for handle in handles:
             handle.remove()
 
@@ -400,8 +413,8 @@ class BaselineEquivalenceTests(unittest.TestCase):
                 )
             )
 
-        self.base(self.feature, self.prior)
-        self.adapted(self.feature, self.prior)
+        self.base(self.feature, self.prior, self.market)
+        self.adapted(self.feature, self.prior, self.market)
         for handle in handles:
             handle.remove()
 
@@ -422,16 +435,16 @@ class BaselineEquivalenceTests(unittest.TestCase):
                 )
             )
 
-        self.base(self.feature, self.prior)
-        self.adapted(self.feature, self.prior)
+        self.base(self.feature, self.prior, self.market)
+        self.adapted(self.feature, self.prior, self.market)
         for handle in handles:
             handle.remove()
 
         self.assertTrue(torch.equal(seen["base"][0], seen["adapted"][0]))
 
     def test_full_prediction_forward_bitwise_equal_010(self):
-        base_out = self.base(self.feature, self.prior)
-        adapted_out = self.adapted(self.feature, self.prior)
+        base_out = self.base(self.feature, self.prior, self.market)
+        adapted_out = self.adapted(self.feature, self.prior, self.market)
 
         self.assertEqual(len(base_out), 5)
         self.assertEqual(len(adapted_out), 5)
@@ -448,6 +461,7 @@ class TrainabilityTests(unittest.TestCase):
         self.model = build_model().eval()
         self.feature = torch.randn(11, 5, 8)
         self.prior = torch.randn(11, 3)
+        self.market = torch.randn(11, 5, 3)
 
     def _train_one_step(self):
         model = self.model
@@ -458,7 +472,7 @@ class TrainabilityTests(unittest.TestCase):
             weight_decay=0.0,
         )
         label = torch.randn(11)
-        y_pred, _, _, _, aux_loss = model(self.feature, self.prior)
+        y_pred, _, _, _, aux_loss = model(self.feature, self.prior, self.market)
         loss = model.rank_loss(y_pred, label) + model.aux_weight * aux_loss
         optimizer.zero_grad()
         loss.backward()
@@ -517,14 +531,14 @@ class TrainabilityTests(unittest.TestCase):
         optimizer.step()
         model.eval()
 
-        h_batch, z_q = stage1_latents(model, self.feature)
+        h_batch, z_q = stage1_latents(model, self.feature, self.market)
         z_stage2 = model.build_stage2_latent(h_batch, z_q)
 
         self.assertGreater((z_stage2 - z_q).abs().sum().item(), 0.0)
 
     def test_quantizer_assignment_unchanged_by_adapter_path(self):
         model = self.model
-        h_batch, z_q_before = stage1_latents(model, self.feature)
+        h_batch, z_q_before = stage1_latents(model, self.feature, self.market)
         with torch.no_grad():
             _, _, (_, _, vq_idx_before) = model.quantizer(h_batch)
 
@@ -532,7 +546,7 @@ class TrainabilityTests(unittest.TestCase):
         optimizer.step()
         model.eval()
 
-        h_after, z_q_after = stage1_latents(model, self.feature)
+        h_after, z_q_after = stage1_latents(model, self.feature, self.market)
         with torch.no_grad():
             _, _, (_, _, vq_idx_after) = model.quantizer(h_after)
 
@@ -549,7 +563,8 @@ class CompatibilityTests(unittest.TestCase):
             model.quantization_confidence_adapter.bias.normal_(0.0, 0.1)
         feature = torch.randn(7, 5, 8)
         prior = torch.randn(7, 3)
-        reference = model(feature, prior)
+        market = torch.randn(7, 5, 3)
+        reference = model(feature, prior, market)
 
         state = copy.deepcopy(model.state_dict())
         restored = build_model().eval()
@@ -557,7 +572,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertFalse(result.missing_keys)
         self.assertFalse(result.unexpected_keys)
 
-        reloaded = restored(feature, prior)
+        reloaded = restored(feature, prior, market)
         self.assertEqual(len(reloaded), 5)
         for index, (reference_value, reloaded_value) in enumerate(
             zip(reference, reloaded)

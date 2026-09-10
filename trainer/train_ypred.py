@@ -66,8 +66,13 @@ class GenerateReturn(pl.LightningModule):
         self.commit_weight = vqvae_cfg['quantizer']['commit_weight']  # beta
 
         # Encoder
-        self.transformer_heads = vqvae_cfg['encoder']['num_heads']
-        self.transformer_layers = vqvae_cfg['encoder']['num_layers']
+        encoder_cfg = vqvae_cfg['encoder']
+        self.transformer_heads = encoder_cfg['num_heads']
+        self.transformer_layers = encoder_cfg['num_layers']
+        market_gate_cfg = encoder_cfg['market_gate']
+        universe = config['data']['universe']
+        self.market_input_dim = market_gate_cfg['input_dim']
+        self.market_beta = market_gate_cfg['beta'][universe]
 
         # Decoder
         self.initial_T = vqvae_cfg['decoder']['initial_T']
@@ -80,7 +85,14 @@ class GenerateReturn(pl.LightningModule):
             gru_hidden_size=self.hidden_size,
             num_transformer_heads=self.transformer_heads,
             num_transformer_layers=self.transformer_layers,
-            final_embed_dim_d=self.vq_embed_dim
+            final_embed_dim_d=self.vq_embed_dim,
+            encoder_type=encoder_cfg.get('type', 'master'),
+            temporal_num_heads=encoder_cfg.get('temporal_num_heads'),
+            spatial_num_heads=encoder_cfg.get('spatial_num_heads'),
+            temporal_dropout=encoder_cfg.get('temporal_dropout', 0.1),
+            spatial_dropout=encoder_cfg.get('spatial_dropout', 0.1),
+            market_input_dim=self.market_input_dim,
+            market_beta=self.market_beta,
         )
 
         # 2. Vector Quantizer
@@ -179,11 +191,10 @@ class GenerateReturn(pl.LightningModule):
         batch   = batch.float()
         parts = unpack_batch(batch)
         feature, prior_factor, market_feature, future_returns = parts
-        # market_feature is deliberately unused by the current baseline.
         
         label = parts.target(self.target_index + 1)
 
-        return feature, prior_factor, label
+        return feature, prior_factor, market_feature, label
 
     @staticmethod
     def quantization_error(h_batch, z_q):
@@ -202,11 +213,11 @@ class GenerateReturn(pl.LightningModule):
         q_error = self.quantization_error(h_batch, z_q)
         return z_q + self.quantization_confidence_adapter(q_error)
 
-    def forward(self, feature, prior_factor):
+    def forward(self, feature, prior_factor, market_feature):
 
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
-        h_batch = self.encoder(feature_normalized)  # (B, H)
+        h_batch = self.encoder(feature_normalized, market_feature)  # (B, H)
         z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
         z_stage2 = self.build_stage2_latent(h_batch, z_q)
 
@@ -228,8 +239,10 @@ class GenerateReturn(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, market_feature, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, market_feature
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss
@@ -243,8 +256,10 @@ class GenerateReturn(pl.LightningModule):
         return {"loss": loss}
     
     def validation_step(self, batch, batch_idx):
-        feature, prior_factor, label = self._get_data(batch, batch_idx)
-        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(feature, prior_factor)
+        feature, prior_factor, market_feature, label = self._get_data(batch, batch_idx)
+        y_pred, beta_p, beta_l, z_q, aux_loss = self.forward(
+            feature, prior_factor, market_feature
+        )
 
         mse_loss = self.rank_loss(y_pred, label)
         main_loss = mse_loss

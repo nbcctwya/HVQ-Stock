@@ -93,12 +93,13 @@ class SchemaTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     cls._get_data(owner, torch.zeros(2, 20, 181), 0)
 
-    def test_inference_uses_canonical_returns_and_ignores_market(self):
+    def test_inference_uses_canonical_returns_and_market(self):
         from utils import test as inference
 
         class Model(torch.nn.Module):
-            def forward(self, stock, prior):
-                return stock[:, -1, 0] + prior[:, 0], None, None, None, None
+            def forward(self, stock, prior, market):
+                prediction = stock[:, -1, 0] + prior[:, 0] + market[:, -1, 0]
+                return prediction, None, None, None, None
 
         class Loader(list):
             dataset = SimpleNamespace(get_index=lambda: pd.MultiIndex.from_product(
@@ -113,7 +114,7 @@ class SchemaTest(unittest.TestCase):
                 first = inference.run_inference(Model(), Loader([self.batch, self.batch + 1]), config, "cpu")[0]
                 self.assertEqual(parser.call_count, 2)
             second = inference.run_inference(Model(), Loader([changed, changed + 1]), config, "cpu")[0]
-        pd.testing.assert_frame_equal(first, second, check_exact=True)
+        self.assertFalse(first.score.equals(second.score))
         np.testing.assert_array_equal(first.label.to_numpy(), torch.cat([
             unpack_batch(self.batch).target(5), unpack_batch(self.batch + 1).target(5)]).numpy())
         with self.assertRaises(ValueError):

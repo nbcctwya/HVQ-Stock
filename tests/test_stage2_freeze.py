@@ -13,7 +13,10 @@ loading is patched out (freeze behaviour does not depend on checkpoint
 contents).
 """
 
+import ast
+import inspect
 import sys
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,6 +26,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trainer.train_ypred import GenerateReturn
+from module.layers.encoder import Gate
 
 
 def tiny_config():
@@ -34,7 +38,14 @@ def tiny_config():
             "num_prior_factors": 3,
             "vq_embed_dim": 8,
             "num_embed": 16,
-            "encoder": {"num_heads": 2, "num_layers": 1},
+            "encoder": {
+                "num_heads": 2,
+                "num_layers": 1,
+                "market_gate": {
+                    "input_dim": 3,
+                    "beta": {"csi300": 10, "sp500": 5},
+                },
+            },
             "quantizer": {
                 "decay": 0.95,
                 "commit_weight": 0.25,
@@ -69,6 +80,7 @@ def tiny_config():
                 "batch_first": True,
             },
         },
+        "data": {"universe": "csi300"},
         "train": {"learning_rate": 0.0001},
     }
 
@@ -84,6 +96,7 @@ class Stage2FreezeTest(unittest.TestCase):
         self.model = build_model()
         self.feature = torch.randn(6, 5, 8)
         self.prior = torch.randn(6, 3)
+        self.market = torch.randn(6, 5, 3)
 
     def test_train_call_keeps_frozen_modules_in_eval(self):
         self.model.train()  # what Lightning does at training start
@@ -113,7 +126,7 @@ class Stage2FreezeTest(unittest.TestCase):
         weight_before = self.model.quantizer.embedding.weight.detach().clone()
         embed_prob_before = self.model.quantizer.embed_prob.detach().clone()
         with torch.no_grad():
-            self.model(self.feature, self.prior)
+            self.model(self.feature, self.prior, self.market)
         self.assertTrue(torch.equal(weight_before, self.model.quantizer.embedding.weight.detach()))
         self.assertTrue(torch.equal(embed_prob_before, self.model.quantizer.embed_prob))
 
@@ -122,9 +135,49 @@ class Stage2FreezeTest(unittest.TestCase):
         # repeated forwards of the same input give identical z_q.
         self.model.train()
         with torch.no_grad():
-            z_q1 = self.model(self.feature, self.prior)[3]
-            z_q2 = self.model(self.feature, self.prior)[3]
+            z_q1 = self.model(self.feature, self.prior, self.market)[3]
+            z_q2 = self.model(self.feature, self.prior, self.market)[3]
         self.assertTrue(torch.equal(z_q1, z_q2))
+
+    def test_market_is_consumed_only_by_frozen_stage1_encoder(self):
+        gate_modules = [
+            name for name, module in self.model.named_modules()
+            if isinstance(module, Gate)
+        ]
+        self.assertEqual(gate_modules, ["encoder.feature_gate"])
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(GenerateReturn.forward)))
+        market_reads = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id == "market_feature"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        self.assertEqual(len(market_reads), 1)
+        encoder_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr == "encoder"
+        ]
+        self.assertEqual(len(encoder_calls), 1)
+        self.assertIn(market_reads[0], encoder_calls[0].args)
+
+    def test_stage2_reconstructs_gate_with_universe_beta(self):
+        for universe, beta in (("csi300", 10), ("sp500", 5)):
+            with self.subTest(universe=universe):
+                config = tiny_config()
+                config["data"]["universe"] = universe
+                with mock.patch.object(
+                    GenerateReturn,
+                    "load_pretrained_vqvae",
+                    lambda self, checkpoint_path=None: None,
+                ):
+                    model = GenerateReturn(config, T_max=10)
+                self.assertEqual(model.market_beta, beta)
+                self.assertEqual(model.encoder.feature_gate.t, beta)
 
 
 if __name__ == "__main__":
