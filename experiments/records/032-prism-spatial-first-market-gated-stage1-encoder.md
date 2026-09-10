@@ -118,12 +118,22 @@ Notes:
 
 ## Result
 
-Status: FAILED
+Status: DONE（test 区间 2023-01-01 – 2025-12-31）
 
-失败原因：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/032/run/stage1.log
+IC: 0.0332
+ICIR: 0.1993
+RankIC: 0.0505
+RankICIR: 0.3250
+
+Annual Return: 10.72%（基准 6.40%，超额 4.32%）
+Sharpe: 0.5890
+Sortino: 0.8956
+MDD: -26.44%
+Calmar: 0.4056
+Turnover: 0.3321
 
 ## Conclusion
 
-Phase 2 执行失败：command failed with exit code 1; see /home/nbcctwya/baselines/masterVQ/HVQ-Stock/artifacts/032/run/stage1.log
+Phase 2 固定执行器完成正式训练、预测与回测（pinned commit 0e324ec93c272415a92b61d283d586cfe9e06764）。Stage 1 best checkpoint：`infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=9-val_loss=0.5377.ckpt`（self-trained）；Stage 2 seed 0。
 
-全部 artifact 与日志保留在 `artifacts/032/run/`。
+产物：`artifacts/032/run/`（checkpoints/、res/、stage1.log、stage2.log、backtest.log、summary.json）。
