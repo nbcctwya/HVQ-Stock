@@ -337,3 +337,15 @@ experiments:
     # Stage 2 (Shared-Routed MoE + Quantization Confidence Adapter) is
     # unchanged.
     stage1_source: "031"
+  - id: "036"
+    name: combine-025-017-shared-routed-decoupling
+    base: exp/025-combine-010-019-shared-routed-quant-confidence
+    branch: exp/036-combine-025-017-shared-routed-decoupling
+    commit: c6bf8cef0056fec179489a5b7c1e0994e232f261
+    status: pending
+    # Stage 2-only experiment on top of 025: add 017's Shared-Routed
+    # Decoupling (L_moe = L_route + 0.01 * mean(cos(shared, routed)^2)).
+    # Reuse 010's formal Stage 1 (artifacts/010/run/.stage1.done -> the
+    # corrected PRISM-VQ external exact checkpoint, single VQ512, seed 42),
+    # same provenance as 025.
+    stage1_source: "010"
