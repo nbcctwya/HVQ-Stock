@@ -16,8 +16,10 @@ vqvae:
   num_embed: 512    
 
   encoder:
+    type: 'temporal-attention'
     num_heads: 2 
     num_layers: 1
+    temporal_dropout: 0.1
 
   quantizer:
     decay: 0.95
