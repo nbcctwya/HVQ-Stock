@@ -313,3 +313,15 @@ experiments:
     # encoder checkpoint, single VQ512, seed 42). 025's Stage 2
     # (Shared-Routed MoE + Quantization Confidence Adapter) is unchanged.
     stage1_source: "027"
+  - id: "034"
+    name: combine-025-028-temporal-attention-stage1
+    base: exp/025-combine-010-019-shared-routed-quant-confidence
+    branch: exp/034-combine-025-028-temporal-attention-stage1
+    commit: 2b1f576e4a7d46b098b6278b2fe76672f5881a23
+    status: pending
+    # Stage 2-only experiment on top of 025: reuse 028's formal Stage 1
+    # (artifacts/028/run/.stage1.done -> 028's self-trained
+    # temporal-attention encoder checkpoint, single VQ512, seed 42).
+    # 025's Stage 2 (Shared-Routed MoE + Quantization Confidence Adapter)
+    # is unchanged.
+    stage1_source: "028"
