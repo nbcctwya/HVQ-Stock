@@ -351,4 +351,16 @@ class AdditionalTests(unittest.TestCase):
             with self.assertRaisesRegex(Phase3Error,'orphan'):start(root,retry_failed=True)
             spawn.assert_not_called()
 
+    def test_remote_shutdown_command_resolves_root_and_path_at_runtime(self):
+        m={**self.machine,'kind':'remote','ssh_alias':'fake',
+           'identity':{'hostname':'remote','machine_id':'remote-id'},'shutdown':'ssh_poweroff'}
+        r=Remote(m)
+        with patch.object(r,'identity',return_value=m['identity']), \
+             patch.object(r,'command',return_value='') as command:
+            self.assertEqual(r.shutdown(m['identity'],dry_run=False),'requested_unconfirmed')
+        args=command.call_args[0][0]
+        self.assertEqual(args[:2],['bash','-c'])
+        self.assertIn('id -u',args[2]); self.assertIn('shutdown -h now',args[2])
+        self.assertNotIn('/sbin/shutdown',args[2]); self.assertNotIn('sudo -n /sbin',args[2])
+
 if __name__=='__main__':unittest.main()

@@ -101,8 +101,12 @@ class Remote(Local):
             raise Phase3Error('remote shutdown capability not enabled')
         # A disconnect is NOT proof of power-off. No generic cloud provider status
         # API is assumed. Persist intent BEFORE invoking this method.
+        # AutoDL containers run as root and have no sudo; shutdown lives in
+        # /usr/bin, not /sbin. Resolve at run time instead of hardcoding.
+        script=('if [ "$(id -u)" = 0 ]; then shutdown -h now; '
+                'else sudo -n shutdown -h now; fi')
         try:
-            self.command(['sudo','-n','/sbin/shutdown','-h','now'],timeout=20)
+            self.command(['bash','-c',script],timeout=20)
         except (subprocess.SubprocessError,OSError):
             return 'requested_unconfirmed'
         return 'requested_unconfirmed'

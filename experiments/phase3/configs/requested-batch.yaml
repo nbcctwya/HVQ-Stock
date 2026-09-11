@@ -1,8 +1,9 @@
 # Requested scientific scope, NOT an instruction to execute now.
-# One device may consume all four experiments in order. Reassign explicitly
-# when machines are available; never start offline machines automatically.
+# One experiment per device; machines were re-verified online 2026-09-11.
+# baseline remains blocked until its seed0 compatibility audit fills the
+# two null fields below; never fabricate a PASS report to unblock it.
 schema: 1
-batch_id: baseline-010-019-025
+batch_id: baseline-010-019-025-034
 local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python
 seeds: [1, 2, 3, 4]
 baseline:
@@ -10,9 +11,18 @@ baseline:
   compatibility_report: null
   stage1_ckpt: artifacts/baseline/run/checkpoints/infucsi300_h128_VQK512_C128_emb128_dl2p10_s42-epoch=7-val_loss=0.5712.ckpt
 devices:
-  - machine: autodl-2080ti-3
+  - machine: autodl-2080ti-1
     experiments:
       - id: baseline
+  - machine: autodl-2080ti-2
+    experiments:
       - id: "010"
+  - machine: autodl-2080ti-3
+    experiments:
       - id: "019"
+  - machine: autodl-2080ti-4
+    experiments:
       - id: "025"
+  - machine: autodl-2080ti-5
+    experiments:
+      - id: "034"

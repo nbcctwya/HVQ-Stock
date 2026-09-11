@@ -1,8 +1,8 @@
 # Phase 3 RULES
 
 本规则对应本目录当前可执行实现。Phase 3 始终称为 Phase 3，不使用 Phase3.1 等名称。
-用户当次明确约束优先。本轮开发结束后停止，不运行正式 multi-seed、不启动任何云实例/GPU、
-不执行真实远程关机。可用的真实测试机器只有无卡的 autodl-2080ti-3。
+用户当次明确约束优先。在线真实机器见 configs/machines.yaml（2026-09-11 起为
+autodl-2080ti-1 至 -5，各一块 2080 Ti）；不要把离线机器当作可用。
 
 ## 1. 科研边界
 
@@ -78,7 +78,8 @@
 - Remote shutdown 要有显式配置能力和 `--allow-shutdown`；缺少时只 dry-run/disabled。
 - 关机意图先落盘。SSH 失联不证明关机，当前 backend 仅 reported requested_unconfirmed。
   不重发不确定的关机请求、不谎称成功；记录 attention。不得启动其他机器来“验证”。
-- 本轮只测试 fake/dry-run 分支，不传 `--allow-shutdown`，不执行真实关机。
+- 真实关机仅限当次用户明确授权的正式批次（配置能力 + `--allow-shutdown`）；
+  开发/测试轮只走 fake/dry-run 分支。
 
 ## 8. 评估与通知
 

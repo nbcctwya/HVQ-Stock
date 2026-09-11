@@ -1,7 +1,31 @@
 # Phase 3 VALIDATION
 
-记录 Phase 3 工程验收的真实执行结果。最后更新：2026-09-11（收尾轮）。
+记录 Phase 3 工程验收的真实执行结果。最后更新：2026-09-11（收尾轮 + 五机上线配置轮）。
 本文件只陈述实际运行过的验证；未真实执行的能力明确标注为未验证。
+
+## 0. 五机上线配置轮（2026-09-11）
+
+五台 autodl-2080ti-1 至 -5 全部 SSH 实测在线：各一块 RTX 2080 Ti（GPU UUID
+互不相同）、远程 Python 3.11.15、关键包版本与本机一致（torch 2.8.0 /
+pytorch-lightning 2.6.4 / pyqlib 0.9.7 / numpy 2.4.4 / pandas 2.3.3 /
+hydra-core 1.3.3 / omegaconf 2.3.1，本机 torch 的 +cu129 后缀按实现规则剥离后
+相等）、均有 `/root/.qlib/qlib_data/cn_data`、磁盘余量 39–50G。
+
+**重要实测发现：五台机器 `/etc/machine-id` 完全相同**（AutoDL 克隆镜像）。
+pinned identity 的区分半是 hostname（五台互不相同）；`load_specs` 的重复物理
+设备检查与 device_loop 的身份校验仍然有效，但 machine_id 单独不再能区分机器。
+
+关机后端实测：五台均以 root 运行、**无 sudo、无 `/sbin/shutdown`**（实际为
+`/usr/bin/shutdown`）。Astra 的 `sudo -n /sbin/shutdown` 在这些机器上必然失败。
+修复为运行时解析：root 直接 `shutdown -h now`，否则 `sudo -n shutdown -h now`
+（新增单测锁定，25 项 phase3 测试 / 107 项全量回归均 OK）。真实关机命令仍未执行。
+
+配置更新：`machines.yaml` 列入五台（均 `ssh_poweroff` 能力）；
+`requested-batch.yaml` 改为一机一实验（baseline→-1、010→-2、019→-3、025→-4、
+034→-5，seeds [1,2,3,4]）。dry-run 实测：requested batch 因 baseline 审计缺失
+正确阻塞（exit 1，错误信息干净）；不含 baseline 的临时 4 实验 batch
+（010/019/025/034 各一台）dry-run exit 0，034 的 queue/record/marker/Stage 1
+来源链全部通过校验。正式 batch 尚未启动。
 
 ## 1. 实际运行的测试与结果
 
@@ -112,7 +136,8 @@ notify.py，与 Phase 2 文档约定一致。修复后在剥离三个环境变�
 
 ## 8. 正式使用前剩余 blocker
 
-1. **GPU 资源**：当前唯一在线机器 autodl-2080ti-3 为无卡模式，正式训练未验证。
+1. **GPU 训练链路**：五台 2080 Ti 已上线，但真实 `stage2.py` 正式训练审计、
+   远程数据重建 + 全量数据 fingerprint 比对仍未执行过；首个正式 batch 即首验。
 2. **Baseline 兼容性审计**：需人工完成并填写 requested-batch 的 commit /
    compatibility_report（含 `identity(inventory(run, allow_symlinks=True))`
    的 seed0_tree_sha256），否则 baseline 任务正确阻塞。

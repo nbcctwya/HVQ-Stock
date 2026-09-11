@@ -64,8 +64,10 @@ Baseline 是特殊名称，不创建 `000`。必须提供完整 commit 和 seed0
 并展示默认 seeds 与 per-experiment seeds。列表顺序就是执行顺序，不排序、不负载均衡。
 同一实验不能分配给多个设备；同一物理身份不能以两个 machine 名称重复分配。
 
-[machines.yaml](configs/machines.yaml) 目前只列 `autodl-2080ti-3`，它目前为无卡模式。
-其他机器不应被当作在线。`work_root` 必须是专用 scratch；local scratch 不得位于
+[machines.yaml](configs/machines.yaml) 目前列 `autodl-2080ti-1` 至 `autodl-2080ti-5`
+五台在线机器（2026-09-11 实测各一块 RTX 2080 Ti）。AutoDL 克隆机 `/etc/machine-id`
+相同，pinned identity 的区分半是 hostname；五台 GPU UUID 已确认互不相同。
+`work_root` 必须是专用 scratch；local scratch 不得位于
 本仓库的 canonical artifacts 下。路径可包含空格，命令使用参数数组/SSH shell quoting。
 
 Machine 字段：`kind: local|remote`、绝对 `python`、绝对 `work_root`、单 GPU ordinal

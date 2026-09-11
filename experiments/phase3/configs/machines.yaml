@@ -1,6 +1,30 @@
 # Runtime machine configuration, separate from experiment selection.
-# Only autodl-2080ti-3 is currently online (CPU/no-card mode).
+# All five autodl-2080ti-N are online with one RTX 2080 Ti each (verified 2026-09-11).
+# Note: AutoDL clones share /etc/machine-id; hostname is the distinguishing half
+# of the pinned identity. GPU UUIDs were verified distinct per machine.
 machines:
+  autodl-2080ti-1:
+    kind: remote
+    ssh_alias: autodl-2080ti-1
+    python: /root/miniconda3/envs/quantbase/bin/python
+    work_root: /root/autodl-tmp/hvq-phase3
+    gpu: "0"
+    min_free_gb: 10
+    identity:
+      hostname: autodl-container-f7da119752-1426b26b
+      machine_id: 5d04e104cf744bddb12c08eb61a501e9
+    shutdown: ssh_poweroff
+  autodl-2080ti-2:
+    kind: remote
+    ssh_alias: autodl-2080ti-2
+    python: /root/miniconda3/envs/quantbase/bin/python
+    work_root: /root/autodl-tmp/hvq-phase3
+    gpu: "0"
+    min_free_gb: 10
+    identity:
+      hostname: autodl-container-22da11ad52-e6e1cd82
+      machine_id: 5d04e104cf744bddb12c08eb61a501e9
+    shutdown: ssh_poweroff
   autodl-2080ti-3:
     kind: remote
     ssh_alias: autodl-2080ti-3
@@ -11,4 +35,26 @@ machines:
     identity:
       hostname: autodl-container-36da11a152-33f42d7d
       machine_id: 5d04e104cf744bddb12c08eb61a501e9
-    shutdown: disabled
+    shutdown: ssh_poweroff
+  autodl-2080ti-4:
+    kind: remote
+    ssh_alias: autodl-2080ti-4
+    python: /root/miniconda3/envs/quantbase/bin/python
+    work_root: /root/autodl-tmp/hvq-phase3
+    gpu: "0"
+    min_free_gb: 10
+    identity:
+      hostname: autodl-container-22da11ad52-cb658aab
+      machine_id: 5d04e104cf744bddb12c08eb61a501e9
+    shutdown: ssh_poweroff
+  autodl-2080ti-5:
+    kind: remote
+    ssh_alias: autodl-2080ti-5
+    python: /root/miniconda3/envs/quantbase/bin/python
+    work_root: /root/autodl-tmp/hvq-phase3
+    gpu: "0"
+    min_free_gb: 10
+    identity:
+      hostname: autodl-container-654f118e52-d8630306
+      machine_id: 5d04e104cf744bddb12c08eb61a501e9
+    shutdown: ssh_poweroff
