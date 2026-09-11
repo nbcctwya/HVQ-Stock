@@ -1,0 +1,14 @@
+# Runtime machine configuration, separate from experiment selection.
+# Only autodl-2080ti-3 is currently online (CPU/no-card mode).
+machines:
+  autodl-2080ti-3:
+    kind: remote
+    ssh_alias: autodl-2080ti-3
+    python: /root/miniconda3/envs/quantbase/bin/python
+    work_root: /root/autodl-tmp/hvq-phase3
+    gpu: "0"
+    min_free_gb: 10
+    identity:
+      hostname: autodl-container-36da11a152-33f42d7d
+      machine_id: 5d04e104cf744bddb12c08eb61a501e9
+    shutdown: disabled

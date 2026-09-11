@@ -1,6 +1,7 @@
 # experiments/
 
-极简实验管理框架：一个 queue + 一组 record，配合两阶段工作流。
+实验管理框架：Phase 1 冻结实验，Phase 2 执行 seed0，Phase 3 对人工指定实验补跑独立训练 seeds。
+Phase 1/2 使用一个 canonical queue；Phase 3 使用 batch specification + runtime state。
 
 ## 目录结构
 
@@ -13,6 +14,7 @@ experiments/
 ├── README.md                     # 本文件
 ├── queue.yaml                    # 真实实验队列（执行器消费它）
 ├── runner.py                     # Phase 2 唯一正式执行器
+├── phase3/                       # 独立 multi-seed coordinator、worker、规范、配置
 ├── records/                      # 所有实验记录，例如 004-market-gated-z1.md
 └── templates/                    # 仅保存用于复制生成具体文件的模板
     ├── experiment.template.md    # 单个实验记录模板
@@ -132,3 +134,16 @@ Stage 1 来源：self，量化结构改变后必须重新训练。
 → 阅读结果 → 用新 ID 验证下一轮构想。
 
 当前执行器会切换共享仓库的检出版本，两个阶段应错开执行。
+
+
+## Phase 3：人工指定实验的 multi-seed 验证
+
+入口、命令、配置和恢复方式见 [phase3/README.md](phase3/README.md)。
+长期规则见 [phase3/RULES.md](phase3/RULES.md)，AI 启动入口见
+[phase3/SUPERVISOR_PROMPT.md](phase3/SUPERVISOR_PROMPT.md)。
+
+唯一正式入口：`python -m experiments.phase3.coordinator`。
+支持 Batch → Device → Ordered Experiments → Ordered Seeds；设备间并行，设备内两层串行。
+Phase 3 不写 Phase 2 queue/record，新增产物独立于原 seed0 tree。
+远程数据由冻结代码和显式原始输入构造；产物在本机验收后才允许 remote shutdown，
+本机统一回测/汇总。本机没有关机能力。日常运行前先执行 coordinator dry-run。

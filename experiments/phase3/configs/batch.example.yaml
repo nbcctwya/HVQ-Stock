@@ -1,0 +1,11 @@
+# Example only. dry-run is CPU-only and does not contact this machine.
+schema: 1
+batch_id: example-010-019
+local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python
+seeds: [1, 2, 3, 4]
+devices:
+  - machine: autodl-2080ti-3
+    experiments:
+      - id: "010"
+      - id: "019"
+        seeds: [1, 2]
