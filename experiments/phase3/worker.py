@@ -58,6 +58,12 @@ def prepare_data(root, task, env):
     data = root/task['data']
     stamp = data/'fingerprint.json'
     code = root/task['code']
+    # numpy transcendentals (log1p/expm1 in the JKP prior chain) dispatch to
+    # X86_V4 SIMD on AVX-512 hosts and differ in the last ULP from the
+    # baseline path used on the coordinator. Pin baseline dispatch so remote
+    # generation reproduces the reference fingerprint bit-exactly; the strict
+    # fingerprint gate below still verifies the result.
+    env = {**env, 'NPY_DISABLE_CPU_FEATURES': 'X86_V4'}
     if not data.exists():
         # Fresh generation directory. A failed partial generation is preserved and
         # must not be silently reused or overwritten on restart.

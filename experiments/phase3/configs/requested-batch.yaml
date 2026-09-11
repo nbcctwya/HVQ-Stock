@@ -2,7 +2,7 @@
 # online 2026-09-11. baseline unblocked by the 2026-09-11 compatibility audit
 # (bit-exact seed0 reproduction), see the report referenced below.
 schema: 1
-batch_id: baseline-010-019-025-034
+batch_id: baseline-010-019-025-034-r2
 local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python
 seeds: [1, 2, 3, 4]
 baseline:
