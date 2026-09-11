@@ -349,3 +349,16 @@ experiments:
     # corrected PRISM-VQ external exact checkpoint, single VQ512, seed 42),
     # same provenance as 025.
     stage1_source: "010"
+  - id: "037"
+    name: combine-028-010-shared-routed-stage2
+    base: exp/034-combine-025-028-temporal-attention-stage1
+    branch: exp/037-combine-028-010-shared-routed-stage2
+    commit: 086d98fff392567c5a24751933a1fcd51926b401
+    status: pending
+    # w/o Confidence ablation of 034: identical to 034 except the 019
+    # Quantization Confidence Adapter is removed, so the Stage 2 latent is
+    # the raw z_q (028 temporal-attention Stage 1 + 010 Shared-Routed MoE
+    # Stage 2). Reuse 028's formal Stage 1 (artifacts/028/run/.stage1.done
+    # -> 028's self-trained temporal-attention encoder checkpoint, single
+    # VQ512, seed 42), same provenance as 034.
+    stage1_source: "028"
