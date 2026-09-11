@@ -46,6 +46,25 @@ dropout 等不同算子）；独立最小健全性测试（纯 matmul+softmax �
 010 由 batch `followup-010-4090d` 补跑。machines.yaml 保留 2080ti-2 条目
 （含故障注释）以维持 r2 manifest 可恢复。
 
+## 0b. 正式 batch 完成记录（2026-09-11）
+
+Batch `baseline-010-019-025-034-r2` 与 `followup-010-4090d` 共同完成 5 个实验
+× seeds 1–4 的正式 multi-seed 执行，全部真实走通：远程数据重建 + 严格
+fingerprint 闸门、真实 GPU `Trainer.fit` 审计（actual seed/global_step/fit
+完成逐任务核对）、产物回传、本机 acceptance（含 seed0/new-seed index/label
+一致性 compare_prediction）、experiment completion 通知、ack、本机统一
+backtest 评估与 mean/std(ddof=1)/n 汇总、逐台关机请求。
+
+- r2：baseline/019/025/034 各 4 seed accepted（16 receipts），010 因事故 2
+  记 failed-of-record，batch-incomplete 如实上报；4 台机器关机请求后 SSH
+  不可达（状态按协议记 `requested_unconfirmed`，无云 API 确认）。
+- followup-010-4090d：010 4 seed accepted（4 receipts），batch-completed；
+  autodl-4090d-1 关机请求后 SSH 不可达。
+- 汇总（n=5，含只读 seed0）：见两 batch 的 `reports/summary.json`；034
+  IC 0.0399±0.0026 / Sharpe 0.9126±0.2437 为五实验最高。
+- 跨 GPU 数值说明：r2 在 2080 Ti、followup 在 4090 D 训练；不同 GPU 的数值
+  差异未消除（README 既有声明），各实验内部 4 个新 seed 均在同一台机器完成。
+
 ## 1. 实际运行的测试与结果
 
 | 测试 | 命令 | 结果 |
