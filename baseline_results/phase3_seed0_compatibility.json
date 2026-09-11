@@ -1,0 +1,9 @@
+{
+  "status": "pass",
+  "commit": "0b823c079393ea6752580978d3593e16aeac3cf6",
+  "seed0_tree_sha256": "d7295a62a1c5187602149204e915d48e8627add550e5fbf93754bcaabd746a90",
+  "audit_date": "2026-09-11",
+  "seed0_run": "artifacts/baseline/run (2026-09-05, main 2c78051bdb9f2cc66e59bbc6a31bd93aa0acd1bb)",
+  "reproduction": "artifacts/_phase3/audit/baseline-seed0-repro (2026-09-11, main 0b823c0, canonical data, train.seed=0)",
+  "evidence": "Bit-exact reproduction: identical 29-epoch Val_RIC trajectory, identical test IC/ICIR/RankIC/RankICIR at float64 precision, 217909/217909 identical scores and labels, identical 0_metric.csv. Full report: baseline_results/PHASE3_SEED0_COMPATIBILITY.md"
+}
