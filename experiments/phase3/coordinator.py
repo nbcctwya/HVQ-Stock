@@ -7,6 +7,7 @@ import math
 import os
 import re
 from pathlib import Path
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -69,9 +70,14 @@ class Coordinator:
             body_path=path.with_suffix('.txt'); body_path.parent.mkdir(parents=True,exist_ok=True)
             body_path.write_text(body,encoding='utf-8')
             try:
-                subprocess.run([self.python,str(self.repo/'experiments/notify.py'),
-                                '--subject',f'[HVQ] Phase3 {kind} — {self.batch["batch_id"]}',
-                                '--body-file',str(body_path)],check=True,capture_output=True,text=True,timeout=45)
+                # Phase 2 convention: SMTP credentials live in ~/.bashrc, which a
+                # non-interactive non-login shell never loads. Deliver through a
+                # login shell so notifications are not deterministically lost when
+                # the coordinator itself runs from a plain shell.
+                command=shlex.join([self.python,str(self.repo/'experiments/notify.py'),
+                                    '--subject',f'[HVQ] Phase3 {kind} — {self.batch["batch_id"]}',
+                                    '--body-file',str(body_path)])
+                subprocess.run(['bash','-lc',command],check=True,capture_output=True,text=True,timeout=45)
                 event['status']='sent'
             except Exception as e:
                 # Never include environment or SMTP response/credentials in our state.

@@ -126,7 +126,8 @@ def resolve(repo,batch,workspace):
             run=safe_path(repo/'artifacts'/key/'run')
             if key=='baseline':
                 b=batch.get('baseline',{})
-                commit=b.get('commit','')
+                # YAML `commit: null` parses to None; treat as missing, not a crash.
+                commit=b.get('commit') or ''
                 if not re.fullmatch('[0-9a-f]{40}',commit):
                     raise Phase3Error('baseline requires exact full commit; branch main is not provenance')
                 report=b.get('compatibility_report')

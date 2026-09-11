@@ -100,7 +100,9 @@ python -m experiments.phase3.coordinator status --batch <batch.yaml> --machines 
 版本变更需要保留原工具以完成旧批次，不原地升级正在执行的 batch。
 
 通知默认开启，仍通过 `experiments/notify.py`；测试可显式 `--no-notify`。
-邮件环境变量应由本机已有安全环境加载；不要把 `.bashrc`、SMTP 凭据上传远程。
+SMTP 凭据按 Phase 2 约定配置在 `~/.bashrc`；coordinator 通过 login shell
+（`bash -lc`）调用 notify.py，非 login shell 启动 coordinator 不会稳定丢失通知。
+邮件环境变量不写入仓库文件，不要把 `.bashrc`、SMTP 凭据上传远程。
 
 Remote 默认不关机。只有 machine 选择 `ssh_poweroff` 且正式命令显式带
 `--allow-shutdown` 才请求真实关机，否则仅 dry-run。SSH backend **只能报告
