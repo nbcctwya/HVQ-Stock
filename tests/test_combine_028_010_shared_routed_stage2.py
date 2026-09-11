@@ -1,11 +1,12 @@
-"""Tests for experiment 034: 028 temporal-attention Stage 1 + 025 Stage 2.
+"""Tests for experiment 037: 028 temporal-attention Stage 1 + 010 Stage 2.
 
-Experiment 034 keeps experiment 025's Stage 2 (Shared-Routed MoE +
-Quantization Confidence Adapter) unchanged and replaces only Stage 1: the
-original PRISM-VQ Stage 1 is swapped for experiment 028's frozen
-temporal-attention Stage 1 (FeatureTransform -> Input Projection ->
-PositionalEncoding -> TAttention -> TemporalAttention ->
-CrossAssetTransformer; no GRU, no SAttention, no Market Gate).
+Experiment 037 is the w/o Confidence ablation of experiment 034: it keeps
+experiment 034's frozen 028 temporal-attention Stage 1 (FeatureTransform ->
+Input Projection -> PositionalEncoding -> TAttention -> TemporalAttention ->
+CrossAssetTransformer; no GRU, no SAttention, no Market Gate) unchanged and
+removes the Quantization Confidence Adapter that 034 inherited from
+experiment 019 via 025.  Stage 2 is therefore exactly experiment 010's
+Shared-Routed MoE consuming the raw hard-quantized latent ``z_q``.
 """
 
 import copy
@@ -42,7 +43,7 @@ from module.quantise import VectorQuantiser
 from trainer.train_ypred import GenerateReturn
 
 
-def tiny_config(adapter=True, shared_expert=True):
+def tiny_config(shared_expert=True):
     return {
         "vqvae": {
             "num_features": 8,
@@ -83,7 +84,6 @@ def tiny_config(adapter=True, shared_expert=True):
             "rank": 0,
             "target_day": 2,
             "use_prior": True,
-            "quantization_confidence_adapter": adapter,
             "transformer": {
                 "num_heads": 2,
                 "num_layers": 1,
@@ -98,9 +98,9 @@ def tiny_config(adapter=True, shared_expert=True):
     }
 
 
-def build_model(adapter=True, shared_expert=True, seed=0):
+def build_model(shared_expert=True, seed=0):
     torch.manual_seed(seed)
-    config = copy.deepcopy(tiny_config(adapter=adapter, shared_expert=shared_expert))
+    config = copy.deepcopy(tiny_config(shared_expert=shared_expert))
     with mock.patch.object(
         GenerateReturn,
         "load_pretrained_vqvae",
@@ -153,7 +153,7 @@ def capture_strict_load(model, checkpoint_path):
 
 
 class DefaultConfigTests(unittest.TestCase):
-    """The default configs/config.yaml must fully represent experiment 034."""
+    """The default configs/config.yaml must fully represent experiment 037."""
 
     def setUp(self):
         config_path = ROOT / "configs" / "config.yaml"
@@ -173,11 +173,13 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertEqual(vqvae["vq_embed_dim"], 128)
         self.assertEqual(vqvae["num_embed"], 512)
 
-    def test_025_stage2_mechanisms_still_enabled(self):
+    def test_010_stage2_mechanisms_still_enabled(self):
         predictor = self.config["predictor"]
         self.assertIs(predictor["shared_expert"], True)
-        self.assertIs(predictor["quantization_confidence_adapter"], True)
         self.assertEqual(predictor["n_expert"], 2)
+
+    def test_no_quantization_confidence_adapter_in_default_config(self):
+        self.assertNotIn("quantization_confidence_adapter", self.config["predictor"])
 
     def test_seed_and_data_splits_unchanged(self):
         self.assertEqual(self.config["train"]["seed"], 0)
@@ -185,6 +187,43 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertEqual(data["train_period"], ["2009-01-01", "2020-12-31"])
         self.assertEqual(data["valid_period"], ["2021-01-01", "2022-12-31"])
         self.assertEqual(data["test_period"], ["2023-01-01", "2025-12-31"])
+
+
+class NoAdapterTests(unittest.TestCase):
+    """The 019 Quantization Confidence Adapter must be fully removed."""
+
+    def setUp(self):
+        self.model = build_model().eval()
+
+    def test_no_adapter_module_or_flag(self):
+        self.assertFalse(hasattr(self.model, "quantization_confidence_adapter"))
+        self.assertFalse(hasattr(self.model, "use_quantization_confidence_adapter"))
+        self.assertFalse(
+            any(
+                "confidence" in name.lower() or "adapter" in name.lower()
+                for name, _ in self.model.named_modules()
+            )
+        )
+        self.assertFalse(
+            any(
+                "confidence" in name.lower() or "adapter" in name.lower()
+                for name, _ in self.model.named_parameters()
+            )
+        )
+
+    def test_no_quantization_error_or_build_stage2_latent_helpers(self):
+        self.assertFalse(hasattr(GenerateReturn, "quantization_error"))
+        self.assertFalse(hasattr(GenerateReturn, "build_stage2_latent"))
+
+    def test_stage2_latent_bitwise_equal_z_q(self):
+        model = self.model
+        feature = torch.randn(9, 5, 8)
+        with torch.no_grad():
+            h_batch = model.encoder(model.revin(feature, mode="norm"))
+            z_q = model.quantizer(h_batch)[0]
+            _, _, _, z_stage2, _ = model(feature, torch.randn(9, 3))
+        self.assertTrue(torch.equal(z_stage2, z_q))
+        self.assertFalse(z_stage2.requires_grad)
 
 
 class EncoderStructureTests(unittest.TestCase):
@@ -295,7 +334,7 @@ class Stage1CheckpointTests(unittest.TestCase):
             )
         )
 
-    def test_forward_h_is_128_dim_and_z_q_from_same_quantizer(self):
+    def test_forward_h_is_128_dim_and_z_stage2_equals_quantizer_z_q(self):
         model = self.model
         self.assertIsInstance(model.quantizer, VectorQuantiser)
         quantizers = [
@@ -320,18 +359,9 @@ class Stage1CheckpointTests(unittest.TestCase):
         with torch.no_grad():
             z_q = model.quantizer(h_batch)[0]
         self.assertEqual(z_q.shape, (4, 128))
-        # Zero-initialized adapter: z_conf is bitwise equal to z_q.
+        # No adapter: the Stage 2 latent is bitwise equal to z_q.
         self.assertTrue(torch.equal(z_stage2, z_q))
         self.assertEqual(y_pred.shape, (4,))
-
-    def test_quantization_error_matches_required_definition(self):
-        h = torch.randn(6, 128)
-        z_q = torch.randn(6, 128)
-        actual = GenerateReturn.quantization_error(h, z_q)
-        expected = torch.mean((h - z_q) ** 2, dim=-1, keepdim=True)
-        self.assertEqual(actual.shape, (6, 1))
-        self.assertTrue(torch.equal(actual, expected))
-        self.assertFalse(actual.requires_grad)
 
 
 class Stage1FreezeTests(unittest.TestCase):
@@ -348,7 +378,7 @@ class Stage1FreezeTests(unittest.TestCase):
             for name, parameter in module.named_parameters():
                 self.assertFalse(parameter.requires_grad, msg=name)
 
-    def test_backward_isolates_stage1_and_trains_adapter(self):
+    def test_backward_isolates_stage1_and_trains_stage2(self):
         model = self.model
         model.train()
         # The train() override must keep frozen Stage 1 modules in eval mode.
@@ -364,17 +394,25 @@ class Stage1FreezeTests(unittest.TestCase):
             for name, parameter in module.named_parameters():
                 self.assertIsNone(parameter.grad, msg=name)
 
-        adapter = model.quantization_confidence_adapter
-        self.assertIsNotNone(adapter.weight.grad)
-        self.assertIsNotNone(adapter.bias.grad)
-        self.assertTrue(torch.isfinite(adapter.weight.grad).all())
-        self.assertTrue(torch.isfinite(adapter.bias.grad).all())
-        self.assertGreater(adapter.weight.grad.abs().sum().item(), 0.0)
-        self.assertGreater(adapter.bias.grad.abs().sum().item(), 0.0)
+        stage2_grads = [
+            parameter.grad
+            for module in (
+                model.loadings,
+                model.latent_value_head,
+                model.z_prior_norm,
+            )
+            for parameter in module.parameters()
+            if parameter.grad is not None
+        ]
+        self.assertTrue(stage2_grads)
+        self.assertTrue(
+            any(grad.abs().sum().item() > 0.0 for grad in stage2_grads)
+        )
+        self.assertTrue(all(torch.isfinite(grad).all() for grad in stage2_grads))
 
 
 class Stage2StructureTests(unittest.TestCase):
-    """The 025 Stage 2 (010 Shared-Routed MoE) structure must be intact."""
+    """The 010 Shared-Routed MoE Stage 2 structure must be intact."""
 
     def setUp(self):
         self.model = build_model().eval()
@@ -400,30 +438,41 @@ class Stage2StructureTests(unittest.TestCase):
         self.assertTrue(hasattr(moe, "mean"))
         self.assertTrue(hasattr(moe, "std"))
 
-    def test_confidence_adapter_is_the_only_extra_module(self):
-        base = build_model(adapter=False, seed=11)
-        adapted = build_model(adapter=True, seed=11)
-
-        base_modules = {name for name, _ in base.named_modules()}
-        adapted_modules = {name for name, _ in adapted.named_modules()}
-        self.assertEqual(adapted_modules - base_modules, {"quantization_confidence_adapter"})
-        self.assertEqual(base_modules - adapted_modules, set())
-
-        adapter = adapted.quantization_confidence_adapter
-        self.assertIsInstance(adapter, nn.Linear)
-        self.assertEqual(adapter.in_features, 1)
-        self.assertEqual(adapter.out_features, 8)
-        self.assertEqual(torch.count_nonzero(adapter.weight).item(), 0)
-        self.assertEqual(torch.count_nonzero(adapter.bias).item(), 0)
-
-    def test_zero_init_stage2_latent_bitwise_equal_z_q(self):
-        model = build_model().eval()
-        feature = torch.randn(9, 5, 8)
+    def test_all_stage2_modules_receive_the_raw_z_q(self):
+        model = self.model
+        feature = torch.randn(7, 5, 8)
+        prior = torch.randn(7, 3)
         with torch.no_grad():
             h_batch = model.encoder(model.revin(feature, mode="norm"))
             z_q = model.quantizer(h_batch)[0]
-        z_stage2 = model.build_stage2_latent(h_batch, z_q)
-        self.assertTrue(torch.equal(z_stage2, z_q))
+
+        seen = {"loadings": [], "latent_head": []}
+        loadings_handle = model.loadings.register_forward_pre_hook(
+            lambda _module, inputs: seen["loadings"].append(inputs[1].detach().clone())
+        )
+        latent_handle = model.latent_value_head.register_forward_pre_hook(
+            lambda _module, inputs: seen["latent_head"].append(
+                inputs[0].detach().clone()
+            )
+        )
+        with torch.no_grad():
+            output = model(feature, prior)
+        loadings_handle.remove()
+        latent_handle.remove()
+
+        self.assertEqual(len(output), 5)
+        self.assertTrue(torch.equal(output[3], z_q))
+        self.assertTrue(torch.equal(seen["loadings"][0], z_q))
+        self.assertTrue(torch.equal(seen["latent_head"][0], z_q))
+
+    def test_auxiliary_loss_and_forward_run(self):
+        model = self.model
+        feature = torch.randn(7, 5, 8)
+        prior = torch.randn(7, 3)
+        with torch.no_grad():
+            y_pred, beta_p, beta_l, z_stage2, aux_loss = model(feature, prior)
+        self.assertEqual(y_pred.shape, (7,))
+        self.assertTrue(torch.isfinite(aux_loss).all())
 
 
 if __name__ == "__main__":

@@ -147,20 +147,6 @@ class GenerateReturn(pl.LightningModule):
         self.rank_loss = RankLoss(alpha=self.rank)
         self.listNet_loss = ListNetLoss(temperature=1.0)
 
-        # Experiment 025: the 019 quantization-confidence mechanism ported onto
-        # the 010 Shared-Routed MoE.  The only new trainable module is appended
-        # after every 010 module has been constructed, so all existing
-        # parameter initializations are preserved for a fixed seed.  Explicit
-        # zero init makes the initial Stage 2 latent exactly equal to the
-        # hard-quantized latent.
-        self.use_quantization_confidence_adapter = config['predictor'].get(
-            'quantization_confidence_adapter', False
-        )
-        if self.use_quantization_confidence_adapter:
-            self.quantization_confidence_adapter = nn.Linear(1, self.vq_embed_dim)
-            nn.init.zeros_(self.quantization_confidence_adapter.weight)
-            nn.init.zeros_(self.quantization_confidence_adapter.bias)
-
     def configure_optimizers(self):
         optimizer  = torch.optim.AdamW(self.parameters(), lr=self.config['train']['learning_rate'], weight_decay=1e-5)
         # Linear warm-up over the first 5% of total steps, then cosine decay.
@@ -188,36 +174,19 @@ class GenerateReturn(pl.LightningModule):
 
         return feature, prior_factor, label
 
-    @staticmethod
-    def quantization_error(h_batch, z_q):
-        """Per-sample scalar VQ distortion, detached from frozen Stage 1."""
-        return torch.mean(
-            (h_batch.detach() - z_q.detach()) ** 2,
-            dim=-1,
-            keepdim=True,
-        )
-
-    def build_stage2_latent(self, h_batch, z_q):
-        """Build the sole latent consumed by all Stage 2 modules."""
-        z_q = z_q.detach()
-        if not self.use_quantization_confidence_adapter:
-            return z_q
-        q_error = self.quantization_error(h_batch, z_q)
-        return z_q + self.quantization_confidence_adapter(q_error)
-
     def forward(self, feature, prior_factor):
 
         ####### STAGE 1: VQVAE #######
         feature_normalized = self.revin(feature, mode="norm")
         h_batch = self.encoder(feature_normalized)  # (B, H)
         z_q, _, (_, min_encodings, vq_idx) = self.quantizer(h_batch)
-        z_stage2 = self.build_stage2_latent(h_batch, z_q)
+        z_q = z_q.detach()
 
         ####### STAGE 2: Loading Generator #######    --此处可改
-        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_stage2)
+        alpha, beta_p, beta_l, loss_imp = self.loadings(feature, z_q)
         prior_factor_normed = self.z_prior_norm(prior_factor)
 
-        f_latent = self.latent_value_head(z_stage2)
+        f_latent = self.latent_value_head(z_q)
 
         y_pred = self.return_predictor(
             alpha    = alpha,
@@ -227,7 +196,7 @@ class GenerateReturn(pl.LightningModule):
             f_latent = f_latent,            # (B,K)
         )
         loss_imp = softcap_log1p(loss_imp, self.aux_imp)
-        return y_pred, beta_p, beta_l, z_stage2, loss_imp
+        return y_pred, beta_p, beta_l, z_q, loss_imp
 
 
     def training_step(self, batch, batch_idx):
