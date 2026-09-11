@@ -1,6 +1,9 @@
 # Requested scientific scope. One experiment per device; machines re-verified
 # online 2026-09-11. baseline unblocked by the 2026-09-11 compatibility audit
 # (bit-exact seed0 reproduction), see the report referenced below.
+# NOTE: this file is the pinned source of running batch r2; do not edit values
+# mid-flight. 010 failed on autodl-2080ti-2 (faulty GPU, instance closed) and is
+# rerun as batch followup-010-4090d (configs/followup-010.yaml) on autodl-4090d-1.
 schema: 1
 batch_id: baseline-010-019-025-034-r2
 local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python

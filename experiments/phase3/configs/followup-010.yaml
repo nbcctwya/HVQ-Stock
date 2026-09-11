@@ -1,0 +1,11 @@
+# Follow-up batch: experiment 010 only, replacing the faulty-GPU assignment
+# (autodl-2080ti-2) from batch baseline-010-019-025-034-r2. New batch id because
+# the r2 manifest is immutable; r2's 010 tasks stay failed-of-record there.
+schema: 1
+batch_id: followup-010-4090d
+local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python
+seeds: [1, 2, 3, 4]
+devices:
+  - machine: autodl-4090d-1
+    experiments:
+      - id: "010"

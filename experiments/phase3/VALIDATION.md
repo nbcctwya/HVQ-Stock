@@ -27,6 +27,25 @@ pinned identity 的区分半是 hostname（五台互不相同）；`load_specs` 
 （010/019/025/034 各一台）dry-run exit 0，034 的 queue/record/marker/Stage 1
 来源链全部通过校验。正式 batch 尚未启动。
 
+## 0a. 正式 batch r1/r2 事故与跟进（2026-09-11）
+
+**事故 1：数据 fingerprint 闸门拦下 r1 全部 20 个任务。** Root cause：远程
+Xeon 8255C 有 AVX-512，numpy 2.4.4 的 `log1p`/`expm1` 分派到 X86_V4 SIMD 路径，
+与本机（i5-14400F，无 AVX-512）的 baseline 路径在最后 1 ULP 上不同，JKP prior
+链（`log1p→rolling→expm1`）把差异带进了数据；两端 qlib 原始数据 md5 相同、
+特征/标签列逐 bit 相同，差异只在 prior 13 列。修复：worker 数据生成固定
+`NPY_DISABLE_CPU_FEATURES=X86_V4`（`worker.py`），fingerprint 检查保持严格逐
+字节、不放容差。预验证：完整重建后三个 split fingerprint 与本机参考逐 bit
+一致，随后 r2 五台机器全部通过闸门。
+
+**事故 2：autodl-2080ti-2 GPU 硬件故障。** 010 的 4 个 seed 在 epoch 0 报
+`CUDA illegal memory access` / `cuDNN EXECUTION FAILED`（出现在 layer_norm/GRU/
+dropout 等不同算子）；独立最小健全性测试（纯 matmul+softmax 循环）立即复现，
+而同软件栈的另外 4 台正常训练。判定为该实例 GPU 硬件故障，与代码无关。
+用户已关闭该实例并新开 autodl-4090d-1（RTX 4090 D，GPU 健全性测试通过）；
+010 由 batch `followup-010-4090d` 补跑。machines.yaml 保留 2080ti-2 条目
+（含故障注释）以维持 r2 manifest 可恢复。
+
 ## 1. 实际运行的测试与结果
 
 | 测试 | 命令 | 结果 |
