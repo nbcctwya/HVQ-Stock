@@ -60,6 +60,9 @@ backtest 评估与 mean/std(ddof=1)/n 汇总、逐台关机请求。
   不可达（状态按协议记 `requested_unconfirmed`，无云 API 确认）。
 - followup-010-4090d：010 4 seed accepted（4 receipts），batch-completed；
   autodl-4090d-1 关机请求后 SSH 不可达。
+- 关机最终确认：用户在 AutoDL 控制台目视确认 5 台实例全部关机成功
+  （2026-09-11）；协议内状态仍为 `requested_unconfirmed`，该人工确认不构成
+  自动化依据。
 - 汇总（n=5，含只读 seed0）：见两 batch 的 `reports/summary.json`；034
   IC 0.0399±0.0026 / Sharpe 0.9126±0.2437 为五实验最高。
 - 跨 GPU 数值说明：r2 在 2080 Ti、followup 在 4090 D 训练；不同 GPU 的数值
