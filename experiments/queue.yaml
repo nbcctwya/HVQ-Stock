@@ -362,3 +362,17 @@ experiments:
     # -> 028's self-trained temporal-attention encoder checkpoint, single
     # VQ512, seed 42), same provenance as 034.
     stage1_source: "028"
+  - id: "038"
+    name: combine-028-019-quant-confidence-stage2
+    base: exp/034-combine-025-028-temporal-attention-stage1
+    branch: exp/038-combine-028-019-quant-confidence-stage2
+    commit: 0a968f77e717c52cf5c48d997c77c104f7c1563d
+    status: pending
+    # w/o Shared-Routed ablation of 034: identical to 034 except the 010
+    # always-on Shared Expert is removed, restoring 019's original
+    # routed-only Stage 2 (028 temporal-attention Stage 1 + 019
+    # Quantization Confidence Adapter on the plain routed FactorGatedMoE).
+    # Reuse 028's formal Stage 1 (artifacts/028/run/.stage1.done -> 028's
+    # self-trained temporal-attention encoder checkpoint, single VQ512,
+    # seed 42), same provenance as 034.
+    stage1_source: "028"
