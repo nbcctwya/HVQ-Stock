@@ -367,7 +367,7 @@ experiments:
     base: exp/034-combine-025-028-temporal-attention-stage1
     branch: exp/038-combine-028-019-quant-confidence-stage2
     commit: 0a968f77e717c52cf5c48d997c77c104f7c1563d
-    status: pending
+    status: running
     # w/o Shared-Routed ablation of 034: identical to 034 except the 010
     # always-on Shared Expert is removed, restoring 019's original
     # routed-only Stage 2 (028 temporal-attention Stage 1 + 019
