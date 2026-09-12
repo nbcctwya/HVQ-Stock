@@ -1,0 +1,16 @@
+# Phase 3 batch: multi-seed (1-4) for the 034 ablation pair 037/038.
+# 037 (w/o Confidence) on autodl-2080ti-4, 038 (w/o Shared-Routed) on
+# autodl-2080ti-5. Both machines re-verified online 2026-09-12 (identity
+# matches machines.yaml pins). User authorized real remote shutdown for
+# these two machines after their tasks are accepted (--allow-shutdown).
+schema: 1
+batch_id: exp-037-038-r1
+local_python: /home/nbcctwya/anaconda3/envs/prism-vq/bin/python
+seeds: [1, 2, 3, 4]
+devices:
+  - machine: autodl-2080ti-4
+    experiments:
+      - id: "037"
+  - machine: autodl-2080ti-5
+    experiments:
+      - id: "038"
