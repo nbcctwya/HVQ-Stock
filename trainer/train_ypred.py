@@ -147,11 +147,12 @@ class GenerateReturn(pl.LightningModule):
         self.rank_loss = RankLoss(alpha=self.rank)
         self.listNet_loss = ListNetLoss(temperature=1.0)
 
-        # Experiment 025: the 019 quantization-confidence mechanism ported onto
-        # the 010 Shared-Routed MoE.  The only new trainable module is appended
-        # after every 010 module has been constructed, so all existing
-        # parameter initializations are preserved for a fixed seed.  Explicit
-        # zero init makes the initial Stage 2 latent exactly equal to the
+        # Experiment 038: the 019 quantization-confidence mechanism on the
+        # original routed-only MoE (010's always-on Shared Expert removed).
+        # The only new trainable module is appended after every baseline
+        # module has been constructed, so all existing parameter
+        # initializations are preserved for a fixed seed.  Explicit zero init
+        # makes the initial Stage 2 latent exactly equal to the
         # hard-quantized latent.
         self.use_quantization_confidence_adapter = config['predictor'].get(
             'quantization_confidence_adapter', False

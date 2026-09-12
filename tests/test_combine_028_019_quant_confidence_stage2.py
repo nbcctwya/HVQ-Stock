@@ -1,11 +1,14 @@
-"""Tests for experiment 034: 028 temporal-attention Stage 1 + 025 Stage 2.
+"""Tests for experiment 038: 028 temporal-attention Stage 1 + 019 Stage 2.
 
-Experiment 034 keeps experiment 025's Stage 2 (Shared-Routed MoE +
-Quantization Confidence Adapter) unchanged and replaces only Stage 1: the
-original PRISM-VQ Stage 1 is swapped for experiment 028's frozen
-temporal-attention Stage 1 (FeatureTransform -> Input Projection ->
-PositionalEncoding -> TAttention -> TemporalAttention ->
-CrossAssetTransformer; no GRU, no SAttention, no Market Gate).
+Experiment 038 is the w/o Shared-Routed ablation of experiment 034: it keeps
+experiment 034's 028 temporal-attention Stage 1 (FeatureTransform -> Input
+Projection -> PositionalEncoding -> TAttention -> TemporalAttention ->
+CrossAssetTransformer; no GRU, no SAttention, no Market Gate) and the 019
+Quantization Confidence Adapter unchanged, and removes only the always-on
+Shared Expert that 034 inherited from experiment 010.  Stage 2 is therefore
+the original routed-only FactorGatedMoE (2 Routed Experts, top-k = 1,
+original router/noise network/W_h/SparseDispatcher/auxiliary loss) exactly as
+in experiment 019.
 """
 
 import copy
@@ -42,7 +45,7 @@ from module.quantise import VectorQuantiser
 from trainer.train_ypred import GenerateReturn
 
 
-def tiny_config(adapter=True, shared_expert=True):
+def tiny_config(adapter=True):
     return {
         "vqvae": {
             "num_features": 8,
@@ -78,7 +81,6 @@ def tiny_config(adapter=True, shared_expert=True):
             "k": 1,
             "pred_len": 4,
             "moe_hidden": 8,
-            "shared_expert": shared_expert,
             "dropout": 0.1,
             "rank": 0,
             "target_day": 2,
@@ -98,9 +100,9 @@ def tiny_config(adapter=True, shared_expert=True):
     }
 
 
-def build_model(adapter=True, shared_expert=True, seed=0):
+def build_model(adapter=True, seed=0):
     torch.manual_seed(seed)
-    config = copy.deepcopy(tiny_config(adapter=adapter, shared_expert=shared_expert))
+    config = copy.deepcopy(tiny_config(adapter=adapter))
     with mock.patch.object(
         GenerateReturn,
         "load_pretrained_vqvae",
@@ -153,7 +155,7 @@ def capture_strict_load(model, checkpoint_path):
 
 
 class DefaultConfigTests(unittest.TestCase):
-    """The default configs/config.yaml must fully represent experiment 034."""
+    """The default configs/config.yaml must fully represent experiment 038."""
 
     def setUp(self):
         config_path = ROOT / "configs" / "config.yaml"
@@ -173,9 +175,11 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertEqual(vqvae["vq_embed_dim"], 128)
         self.assertEqual(vqvae["num_embed"], 512)
 
-    def test_025_stage2_mechanisms_still_enabled(self):
+    def test_shared_expert_removed_and_adapter_enabled(self):
         predictor = self.config["predictor"]
-        self.assertIs(predictor["shared_expert"], True)
+        # 010's always-on Shared Expert flag must be gone entirely, so the
+        # MoE falls back to the original routed-only code path.
+        self.assertNotIn("shared_expert", predictor)
         self.assertIs(predictor["quantization_confidence_adapter"], True)
         self.assertEqual(predictor["n_expert"], 2)
 
@@ -374,24 +378,32 @@ class Stage1FreezeTests(unittest.TestCase):
 
 
 class Stage2StructureTests(unittest.TestCase):
-    """The 025 Stage 2 (010 Shared-Routed MoE) structure must be intact."""
+    """Stage 2 must be the original 019 routed-only MoE (no Shared Expert)."""
 
     def setUp(self):
         self.model = build_model().eval()
         self.moe = self.model.loadings.fusion.moe
 
-    def test_moe_is_factor_gated_with_shared_expert(self):
+    def test_moe_is_factor_gated_without_shared_expert(self):
         moe = self.moe
         self.assertIsInstance(moe, FactorGatedMoE)
-        self.assertIsInstance(moe.shared_expert, SimpleMLP)
-        self.assertEqual(repr(moe.shared_expert), repr(moe.experts[0]))
-        self.assertNotIn(moe.shared_expert, list(moe.experts))
+        # 010's always-on Shared Expert must be entirely absent: the module
+        # is the original routed-only FactorGatedMoE from main/019.
+        self.assertFalse(hasattr(moe, "shared_expert"))
+        self.assertFalse(
+            any("shared" in name.lower() for name, _ in moe.named_modules())
+        )
+        self.assertFalse(
+            any("shared" in name.lower() for name, _ in moe.named_parameters())
+        )
 
     def test_routed_configuration_unchanged(self):
         moe = self.moe
         self.assertEqual(moe.num_experts, 2)
         self.assertEqual(moe.k, 1)
         self.assertEqual(len(moe.experts), 2)
+        for expert in moe.experts:
+            self.assertIsInstance(expert, SimpleMLP)
         self.assertTrue(moe.noisy_gating)
         self.assertTrue(hasattr(moe, "gate"))
         self.assertTrue(hasattr(moe, "noise"))
@@ -399,6 +411,16 @@ class Stage2StructureTests(unittest.TestCase):
         self.assertTrue(hasattr(moe, "softplus"))
         self.assertTrue(hasattr(moe, "mean"))
         self.assertTrue(hasattr(moe, "std"))
+
+    def test_moe_output_is_pure_routed_combination(self):
+        moe = self.moe.eval()
+        x = torch.randn(6, moe.expert_input_size)
+        z = torch.randn(6, moe.gate_input_size)
+        with torch.no_grad():
+            y, loss = moe(x, z)
+        self.assertEqual(y.shape[0], x.shape[0])
+        self.assertTrue(torch.isfinite(y).all())
+        self.assertTrue(torch.isfinite(loss))
 
     def test_confidence_adapter_is_the_only_extra_module(self):
         base = build_model(adapter=False, seed=11)

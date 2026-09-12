@@ -59,8 +59,7 @@ class HyperFusion(nn.Module):
                  drop: float = 0.2,
                  num_experts: int = 4,
                  moe_k: int = 1,
-                 hidden_size: int = 64,
-                 use_shared_expert: bool = False):
+                 hidden_size: int = 64):
         super().__init__()
 
         # 1. Input projection
@@ -80,8 +79,7 @@ class HyperFusion(nn.Module):
             expert_input_size=d_h,
             hidden_size=hidden_size,
             num_experts=num_experts,
-            k=moe_k,
-            use_shared_expert=use_shared_expert,
+            k=moe_k
         )
 
         # 3. Base beta heads (from h)

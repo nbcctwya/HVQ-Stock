@@ -1,15 +1,23 @@
-"""Minimal end-to-end Stage 2 smoke for experiment 025.
+"""Minimal end-to-end Stage 2 smoke for experiment 038.
 
-Experiment 025 = 010 Shared-Routed MoE + 019 Quantization Confidence Adapter.
-This smoke reuses the exact Stage 1 provenance recorded by experiment 010
-(artifacts/010/run/.stage1.done), verifies zero-init bitwise equivalence with
-the 010-equivalent model, exercises shared+routed forward/backward, adapter
-optimization, strict Stage 2 checkpoint round-trip, validation/test inference,
-and the standard prediction format consumed by the Phase 2/backtest pipeline.
-It also records the quantization-confidence diagnostics required for Phase 2
-analysis (q_error statistics, correction magnitude, adapter norms/gradients,
-shared/routed gradient health).  Diagnostics are observational only and do not
-modify the training objective.
+Experiment 038 = 028 temporal-attention Stage 1 + 019 routed-only Stage 2
+(Quantization Confidence Adapter on the original FactorGatedMoE; 010's
+always-on Shared Expert removed).  This is the w/o Shared-Routed ablation of
+experiment 034.  This smoke reuses the exact Stage 1 provenance recorded by
+experiment 028 (artifacts/028/run/.stage1.done), verifies the
+temporal-attention encoder structure (Input Projection -> PositionalEncoding
+-> TAttention -> TemporalAttention -> CrossAssetTransformer; no GRU, no
+SAttention, no Market Gate), verifies strict Stage 1 loading, verifies the
+Shared Expert is entirely absent while the routed path (2 Routed Experts,
+top-k = 1, router/noise network/W_h/SparseDispatcher/auxiliary loss) is
+intact, zero-init bitwise equivalence with the adapter-off model, exercises
+routed forward/backward, adapter optimization, strict Stage 2 checkpoint
+round-trip, validation/test inference, and the standard prediction format
+consumed by the Phase 2/backtest pipeline.  It also records the
+quantization-confidence diagnostics required for Phase 2 analysis (q_error
+statistics, correction magnitude, adapter norms/gradients, routed gradient
+health).  Diagnostics are observational only and do not modify the training
+objective.
 """
 
 import copy
@@ -21,6 +29,7 @@ from pathlib import Path
 import pandas as pd
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 
@@ -29,17 +38,22 @@ sys.path.insert(0, str(ROOT))
 
 from backtest_qlib import _normalize_prediction_frame
 from dataset.schema import TOTAL_DIM
+from module.layers.encoder import (
+    PositionalEncoding,
+    TAttention,
+    TemporalAttention,
+    TemporalAttentionEncoder,
+)
 from module.quantise import VectorQuantiser
 from trainer.train_ypred import GenerateReturn
 from utils import run_inference, seed_everything
 
 
-ARTIFACT_ROOT = ROOT / "artifacts" / "025" / "smoke"
-STAGE1_MARKER = ROOT / "artifacts" / "010" / "run" / ".stage1.done"
-# Canonical queue pinned commit of experiment 010 on main.
-EXPECTED_010_COMMIT = "9b854f0436f8a7c3283fd375661dd6152cc965f1"
-EXPECTED_CHECKPOINT_BYTES = 14584929
-EXPECTED_CHECKPOINT_MD5 = "6b9d9dbfd938c7bd2c7dc5ee33cb38af"
+ARTIFACT_ROOT = ROOT / "artifacts" / "038" / "smoke"
+STAGE1_MARKER = ROOT / "artifacts" / "028" / "run" / ".stage1.done"
+# Final Experiment Commit of experiment 028 (exp/028-prism-temporal-attention-stage1).
+EXPECTED_028_COMMIT = "4494d99542f40be7d3136ab42836f306631f0584"
+EXPECTED_CHECKPOINT_BYTES = 14756745
 EXPECTED_SPLITS = {
     "train_period": ["2009-01-01", "2020-12-31"],
     "valid_period": ["2021-01-01", "2022-12-31"],
@@ -78,7 +92,7 @@ def file_md5(path):
 
 
 def resolve_stage1_checkpoint():
-    """Resolve and validate the exact Stage 1 provenance of experiment 010."""
+    """Resolve and validate the exact Stage 1 provenance of experiment 028."""
     if not STAGE1_MARKER.is_file():
         raise FileNotFoundError(f"Stage 1 marker missing: {STAGE1_MARKER}")
     marker = {}
@@ -86,14 +100,18 @@ def resolve_stage1_checkpoint():
         if "=" in line:
             key, value = line.split("=", 1)
             marker[key.strip()] = value.strip()
-    if marker.get("commit") != EXPECTED_010_COMMIT:
+    if marker.get("commit") != EXPECTED_028_COMMIT:
         raise AssertionError(
-            f"010 Stage 1 marker commit {marker.get('commit')} != pinned "
-            f"queue commit {EXPECTED_010_COMMIT}"
+            f"028 Stage 1 marker commit {marker.get('commit')} != expected "
+            f"028 commit {EXPECTED_028_COMMIT}"
         )
     checkpoint = Path(marker["best"])
+    if not checkpoint.is_file():
+        # The 028 marker records only the checkpoint filename; resolve it
+        # against the marker's own run checkpoints directory.
+        checkpoint = STAGE1_MARKER.parent / "checkpoints" / checkpoint.name
     if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
-        raise FileNotFoundError(f"010 Stage 1 checkpoint missing or empty: {checkpoint}")
+        raise FileNotFoundError(f"028 Stage 1 checkpoint missing or empty: {checkpoint}")
     return checkpoint, marker
 
 
@@ -114,10 +132,79 @@ def build_model(config):
     return GenerateReturn(copy.deepcopy(config), T_max=2)
 
 
+def capture_strict_load(model, checkpoint):
+    """Re-run load_pretrained_vqvae while recording strict load statistics."""
+    captured = {}
+    for name, module in (
+        ("encoder", model.encoder),
+        ("quantizer", model.quantizer),
+        ("revin", model.revin),
+    ):
+        original = module.load_state_dict
+
+        def wrapper(state_dict, strict=True, _name=name, _original=original):
+            result = _original(state_dict, strict)
+            captured[_name] = {
+                "missing": len(result.missing_keys),
+                "unexpected": len(result.unexpected_keys),
+            }
+            return result
+
+        module.load_state_dict = wrapper
+    model.load_pretrained_vqvae(str(checkpoint))
+    for module in (model.encoder, model.quantizer, model.revin):
+        module.eval()
+    return captured
+
+
+def verify_temporal_attention_encoder_structure(model, feature):
+    encoder = model.encoder
+    temporal = getattr(encoder, "temporal_encoder", None)
+    if not isinstance(temporal, TemporalAttentionEncoder):
+        raise AssertionError("Stage 1 encoder is not temporal-attention (temporal_encoder missing)")
+    if not isinstance(temporal.positional_encoding, PositionalEncoding):
+        raise AssertionError("Temporal-attention encoder positional encoding missing")
+    if not isinstance(temporal.temporal_attention, TAttention):
+        raise AssertionError("Temporal-attention encoder TAttention block missing")
+    if not isinstance(temporal.temporal_aggregation, TemporalAttention):
+        raise AssertionError("Temporal-attention encoder aggregation block missing")
+    if any(isinstance(module, nn.GRU) for module in encoder.modules()):
+        raise AssertionError("Stage 1 encoder still contains a GRU")
+    if any(type(module).__name__ == "SAttention" for module in encoder.modules()):
+        raise AssertionError("Stage 1 encoder must not contain SAttention")
+    if any("gate" in name.lower() for name, _ in encoder.named_modules()):
+        raise AssertionError("Stage 1 encoder still contains a Market Gate")
+
+    seen = []
+    modules = [
+        ("feature_transform", encoder.feature_transform),
+        ("input_projection", temporal.input_projection),
+        ("positional_encoding", temporal.positional_encoding),
+        ("tattention", temporal.temporal_attention),
+        ("temporal_aggregation", temporal.temporal_aggregation),
+        ("cross_asset_transformer", encoder.cross_asset_transformer),
+    ]
+    handles = [
+        module.register_forward_hook(
+            lambda _module, _inputs, _output, name=name: seen.append(name)
+        )
+        for name, module in modules
+    ]
+    try:
+        with torch.no_grad():
+            encoder(model.revin(feature, mode="norm"))
+    finally:
+        for handle in handles:
+            handle.remove()
+    if seen != [name for name, _ in modules]:
+        raise AssertionError(f"Temporal-attention encoder data flow order changed: {seen}")
+    return True
+
+
 def main():
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = ARTIFACT_ROOT / "checkpoints"
-    result_dir = ARTIFACT_ROOT / "res" / "combine_010_019_smoke"
+    result_dir = ARTIFACT_ROOT / "res" / "combine_028_019_smoke"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,16 +212,21 @@ def main():
     checkpoint_bytes = stage1_checkpoint.stat().st_size
     checkpoint_md5 = file_md5(stage1_checkpoint)
     if checkpoint_bytes != EXPECTED_CHECKPOINT_BYTES:
-        raise AssertionError("010 Stage 1 checkpoint size changed")
-    if checkpoint_md5 != EXPECTED_CHECKPOINT_MD5:
-        raise AssertionError("010 Stage 1 checkpoint hash changed")
+        raise AssertionError("028 Stage 1 checkpoint size changed")
 
     config = build_config(stage1_checkpoint, adapter=True)
     predictor_cfg = config["predictor"]
-    if predictor_cfg["shared_expert"] is not True:
-        raise AssertionError("configs/config.yaml must keep 010 predictor.shared_expert")
+    if "shared_expert" in predictor_cfg:
+        raise AssertionError("configs/config.yaml must not contain 010 predictor.shared_expert")
     if predictor_cfg["quantization_confidence_adapter"] is not True:
-        raise AssertionError("Default config must enable experiment 025")
+        raise AssertionError("configs/config.yaml must keep 019 quantization_confidence_adapter")
+    encoder_cfg = config["vqvae"]["encoder"]
+    if encoder_cfg.get("type") != "temporal-attention":
+        raise AssertionError("Default config must select the 028 temporal-attention encoder")
+    if encoder_cfg.get("num_heads") != 2 or encoder_cfg.get("num_layers") != 1:
+        raise AssertionError("028 temporal-attention encoder heads/layers changed")
+    if encoder_cfg.get("temporal_dropout") != 0.1:
+        raise AssertionError("028 temporal-attention encoder dropout changed")
     if config["vqvae"]["vq_embed_dim"] != 128:
         raise AssertionError("Stage 1 latent dimension must remain 128")
     if config["vqvae"]["num_embed"] != 512:
@@ -145,10 +237,15 @@ def main():
         if config["data"][key] != expected:
             raise AssertionError(f"Data split changed for {key}")
 
-    # The 010-equivalent base is the same code with the adapter flag off; the
-    # adapter is the only code difference between 025 and 010.
+    # The adapter-off model is the same code with the adapter flag off; the
+    # adapter is the only Stage 2 code difference inside experiment 038.
     base = build_model(build_config(stage1_checkpoint, adapter=False)).eval()
     model = build_model(config).eval()
+
+    strict_load = capture_strict_load(model, stage1_checkpoint)
+    for name, counts in strict_load.items():
+        if counts["missing"] != 0 or counts["unexpected"] != 0:
+            raise AssertionError(f"028 Stage 1 strict load failed for {name}: {counts}")
 
     if not isinstance(model.quantizer, VectorQuantiser):
         raise AssertionError("Stage 1 quantizer is not VectorQuantiser")
@@ -159,10 +256,15 @@ def main():
         raise AssertionError("Stage 1 codebook is not VQ512 x 128")
 
     moe = model.loadings.fusion.moe
-    if moe.shared_expert is None:
-        raise AssertionError("010 Shared Expert is not enabled")
+    if hasattr(moe, "shared_expert"):
+        raise AssertionError("010 always-on Shared Expert must be entirely absent")
+    if any("shared" in name.lower() for name, _ in moe.named_parameters()):
+        raise AssertionError("MoE still contains shared-expert parameters")
     if moe.num_experts != 2 or moe.k != 1:
-        raise AssertionError("010 routed configuration changed (n_expert/top-k)")
+        raise AssertionError("Routed configuration changed (n_expert/top-k)")
+    for attribute in ("gate", "noise", "W_h", "softplus", "mean", "std"):
+        if not hasattr(moe, attribute):
+            raise AssertionError(f"Original router component missing: {attribute}")
 
     adapted_base_state = {
         key: value
@@ -170,13 +272,13 @@ def main():
         if not key.startswith("quantization_confidence_adapter.")
     }
     if base.state_dict().keys() != adapted_base_state.keys():
-        raise AssertionError("Adapter changed 010 state_dict keys")
+        raise AssertionError("Adapter changed Stage 2 state_dict keys")
     existing_init_exact = all(
         torch.equal(value, adapted_base_state[key])
         for key, value in base.state_dict().items()
     )
     if not existing_init_exact:
-        raise AssertionError("Adapter perturbed a 010 parameter initialization")
+        raise AssertionError("Adapter perturbed a Stage 2 parameter initialization")
 
     adapter = model.quantization_confidence_adapter
     adapter_zero_init = bool(
@@ -191,6 +293,8 @@ def main():
     feature = train_batch[:, :, :158]
     prior = train_batch[:, -1, 158:171]
 
+    temporal_structure_ok = verify_temporal_attention_encoder_structure(model, feature)
+
     with torch.no_grad():
         feature_normalized = model.revin(feature, mode="norm")
         h_batch = model.encoder(feature_normalized)
@@ -202,6 +306,8 @@ def main():
         base_output = base(feature, prior)
         adapted_output = model(feature, prior)
 
+    if h_batch.shape[-1] != 128:
+        raise AssertionError("028 Stage 1 pre-VQ latent h is not 128-dim")
     q_error_exact = torch.equal(q_error, expected_q_error)
     initial_latent_exact = torch.equal(z_stage2, z_q)
     initial_forward_exact = all(
@@ -213,10 +319,10 @@ def main():
     if not initial_latent_exact:
         raise AssertionError("Zero-init z_conf is not bitwise equal to z_q")
     if not initial_forward_exact:
-        raise AssertionError("Initial prediction forward is not bitwise equal to 010")
+        raise AssertionError("Initial prediction forward is not bitwise equal to adapter-off")
 
     # One real training step: adapter must learn, Stage 1 must stay frozen,
-    # and both the 010 shared and routed paths must keep receiving gradients.
+    # and the routed path (experts + router) must keep receiving gradients.
     model.train()
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -238,11 +344,6 @@ def main():
     if not torch.isfinite(adapter.weight.grad).all():
         raise AssertionError("Adapter weight gradient is not finite")
 
-    shared_final = moe.shared_expert.net[-1]
-    shared_weight_grad = float(shared_final.weight.grad.abs().sum())
-    shared_bias_grad = float(shared_final.bias.grad.abs().sum())
-    if shared_weight_grad <= 0 or shared_bias_grad <= 0:
-        raise AssertionError("010 Shared Expert lost its training signal")
     routed_grads = [
         float(p.grad.abs().sum())
         for p in moe.experts.parameters()
@@ -250,7 +351,15 @@ def main():
     ]
     routed_grad_l1 = sum(routed_grads)
     if not routed_grads or routed_grad_l1 <= 0:
-        raise AssertionError("010 Routed Experts lost their training signal")
+        raise AssertionError("Routed Experts lost their training signal")
+    router_grads = [
+        float(p.grad.abs().sum())
+        for p in moe.gate.parameters()
+        if p.grad is not None
+    ]
+    router_grad_l1 = sum(router_grads)
+    if not router_grads or router_grad_l1 <= 0:
+        raise AssertionError("Original router lost its training signal")
     frozen_stage1_has_grad = any(
         p.grad is not None
         for module in (model.encoder, model.quantizer, model.revin)
@@ -304,12 +413,11 @@ def main():
         "adapter_bias_l2_norm": float(adapter.bias.norm()),
         "adapter_weight_grad_l1": adapter_weight_grad_l1,
         "adapter_bias_grad_l1": adapter_bias_grad_l1,
-        "shared_expert_final_weight_grad_l1": shared_weight_grad,
-        "shared_expert_final_bias_grad_l1": shared_bias_grad,
         "routed_experts_grad_l1": routed_grad_l1,
+        "router_grad_l1": router_grad_l1,
     }
 
-    checkpoint_path = checkpoint_dir / "combine-010-019-smoke.ckpt"
+    checkpoint_path = checkpoint_dir / "combine-028-019-smoke.ckpt"
     torch.save(
         {
             "epoch": 0,
@@ -374,32 +482,28 @@ def main():
     report = {
         "status": "PASS",
         "stage1": {
-            "source": "010",
+            "source": "028",
             "marker": str(STAGE1_MARKER.relative_to(ROOT)),
             "marker_commit": marker.get("commit"),
-            "expected_010_commit": EXPECTED_010_COMMIT,
-            "marker_reused": marker.get("reused"),
+            "expected_028_commit": EXPECTED_028_COMMIT,
             "checkpoint": str(stage1_checkpoint.relative_to(ROOT)),
             "checkpoint_bytes": checkpoint_bytes,
             "checkpoint_md5": checkpoint_md5,
-            "strict_load": {
-                "encoder": {"missing": 0, "unexpected": 0},
-                "quantizer": {"missing": 0, "unexpected": 0},
-                "revin": {"missing": 0, "unexpected": 0},
-            },
+            "strict_load": strict_load,
+            "encoder_structure": "InputProjection->PositionalEncoding->TAttention->TemporalAttention->CrossAssetTransformer",
+            "temporal_attention_structure_verified": temporal_structure_ok,
+            "no_gru_no_sattention_no_market_gate": True,
             "single_vq512": True,
             "embedding_dimension": 128,
             "data_splits": EXPECTED_SPLITS,
             "frozen_parameters_have_grad": frozen_stage1_has_grad,
         },
-        "inheritance_010": {
-            "shared_expert_enabled": True,
+        "stage2_routed_only": {
+            "shared_expert_present": False,
+            "shared_expert_config_key_present": False,
             "num_routed_experts": moe.num_experts,
             "top_k": moe.k,
-            "shared_expert_final_zero_initialized": bool(
-                torch.count_nonzero(base.loadings.fusion.moe.shared_expert.net[-1].weight)
-                == 0
-            ),
+            "router_components_intact": True,
         },
         "quantization_confidence_adapter": {
             "module": "Linear(1, 128)",
@@ -407,8 +511,8 @@ def main():
             "q_error_formula_exact": q_error_exact,
             "q_error_requires_grad": bool(q_error.requires_grad),
             "initial_z_conf_bitwise_equal_z_q": initial_latent_exact,
-            "initial_prediction_forward_bitwise_equal_010": initial_forward_exact,
-            "existing_parameter_initialization_bitwise_equal_010": existing_init_exact,
+            "initial_prediction_forward_bitwise_equal_adapter_off": initial_forward_exact,
+            "existing_parameter_initialization_bitwise_equal_adapter_off": existing_init_exact,
             "updated": adapter_updated,
             "quantizer_assignment_unchanged": True,
         },

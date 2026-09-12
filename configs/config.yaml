@@ -78,7 +78,6 @@ predictor:
   n_expert: 2
   pred_len: 20  
   moe_hidden: 64 
-  shared_expert: true  # 010: always-on zero-initialized residual expert
   dropout: 0.1
 
   transformer:
@@ -95,7 +94,8 @@ predictor:
   target_day: 5
   use_prior: True
   aux_imp: 3
-  # 025: 019 quantization-confidence adapter on top of 010 shared-routed MoE
+  # 038: 019 quantization-confidence adapter on the original routed-only MoE
+  # (010's always-on Shared Expert removed; w/o Shared-Routed ablation of 034)
   quantization_confidence_adapter: true
   
 train:
